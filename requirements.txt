@@ -1,0 +1,7 @@
+python-telegram-bot[job-queue,rate-limiter]>=21.6,<23
+python-dotenv>=1.0.1
+
+# Để đọc mã QR trong ảnh. Không có gói này thì bot vẫn chạy,
+# chỉ mất khả năng quét QR (xem SCAN_QR trong .env).
+opencv-python-headless>=4.9
+
