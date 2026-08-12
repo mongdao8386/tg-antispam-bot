@@ -46,7 +46,9 @@ from .storage import GLOBAL, Storage
 
 log = logging.getLogger("antispam")
 
-ADMIN_CACHE_TTL = 300  # giây
+ADMIN_CACHE_TTL = 300  # giây - thời gian tin dùng danh sách admin đã lấy được
+ADMIN_RETRY = 20       # giây - lấy hụt thì thử lại sau chừng này, đừng ôm 5 phút
+ADMIN_TRIES = 3        # số lần thử khi mạng chập chờn
 RULES_CACHE_TTL = 60   # giây - lệnh admin xoá cache ngay nên đây chỉ là lưới an toàn
 SELF_DESTRUCT = 20     # giây - thời gian sống của phản hồi lệnh quản trị
 
@@ -223,38 +225,85 @@ async def _target_chat_ids(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     return await _managed_groups(context)
 
 
-async def _fetch_admins(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> tuple[set[int], set[str]]:
-    """(id admin, @username admin) của nhóm. Cache 5 phút để đỡ gọi API."""
-    cache: dict[int, tuple[float, set[int], set[str]]] = context.application.bot_data.setdefault(
-        "admin_cache", {}
+async def _fetch_admins(
+    chat_id: int, context: ContextTypes.DEFAULT_TYPE
+) -> tuple[set[int], set[str], bool]:
+    """(id admin, @username admin, biết chắc chưa) của nhóm.
+
+    Giá trị thứ ba rất quan trọng. Trước đây khi mạng chập chờn, hàm này trả
+    về danh sách RỖNG rồi cache suốt 5 phút - trong 5 phút đó admin bị coi như
+    người lạ: tin nhắn của họ bị quét và có thể bị BAN, lệnh của họ bị xoá.
+    Giờ khi không chắc, hàm báo rõ để nơi gọi chọn cách an toàn.
+
+    Cách xử lý lỗi:
+      - Thành công     -> cache ADMIN_CACHE_TTL (5 phút)
+      - Lỗi tạm thời   -> giữ nguyên giá trị cũ, thử lại sau ADMIN_RETRY (20s)
+      - Bị kick        -> bỏ nhóm khỏi danh sách quản lý
+    """
+    cache: dict[int, tuple[float, set[int], set[str], bool]] = (
+        context.application.bot_data.setdefault("admin_cache", {})
     )
     hit = cache.get(chat_id)
     now = time.monotonic()
-    if hit and now - hit[0] < ADMIN_CACHE_TTL:
-        return hit[1], hit[2]
-    try:
-        admins = await context.bot.get_chat_administrators(chat_id)
-        ids = {a.user.id for a in admins}
-        names = {a.user.username.lower() for a in admins if a.user.username}
-    except Forbidden as exc:
-        await _drop_group(chat_id, context, str(exc))
-        ids, names = set(), set()
-    except TelegramError as exc:
-        log.warning("Không lấy được danh sách admin của %s: %s", chat_id, exc)
-        ids = hit[1] if hit else set()
-        names = hit[2] if hit else set()
-    cache[chat_id] = (now, ids, names)
-    return ids, names
+    if hit:
+        # Dữ liệu lấy hụt thì thử lại sớm, đừng ôm cả 5 phút.
+        song = ADMIN_CACHE_TTL if hit[3] else ADMIN_RETRY
+        if now - hit[0] < song:
+            return hit[1], hit[2], hit[3]
+
+    last_exc: TelegramError | None = None
+    for lan in range(ADMIN_TRIES):
+        try:
+            admins = await context.bot.get_chat_administrators(chat_id)
+            ids = {a.user.id for a in admins}
+            names = {a.user.username.lower() for a in admins if a.user.username}
+            cache[chat_id] = (now, ids, names, True)
+            return ids, names, True
+        except Forbidden as exc:
+            await _drop_group(chat_id, context, str(exc))
+            cache[chat_id] = (now, set(), set(), True)
+            return set(), set(), True
+        except NetworkError as exc:   # gồm cả TimedOut
+            last_exc = exc
+            if lan + 1 < ADMIN_TRIES:
+                await asyncio.sleep(0.5 * (lan + 1))
+        except TelegramError as exc:
+            last_exc = exc
+            break
+
+    # Không lấy được. Còn dữ liệu cũ thì cứ dùng tiếp - admin hiếm khi đổi,
+    # danh sách 5 phút trước gần như chắc chắn vẫn đúng và an toàn hơn nhiều
+    # so với coi như nhóm không có admin nào.
+    if hit and hit[1]:
+        cache[chat_id] = (now, hit[1], hit[2], False)
+        log.info(
+            "Tạm không lấy được danh sách admin của %s (%s), dùng lại bản cũ.",
+            chat_id, last_exc,
+        )
+        return hit[1], hit[2], True
+
+    cache[chat_id] = (now, set(), set(), False)
+    log.warning(
+        "Chưa biết ai là admin của %s (%s). Tạm ngưng xử phạt ở nhóm này để "
+        "khỏi ban nhầm admin; sẽ thử lại sau %ds.",
+        chat_id, last_exc, ADMIN_RETRY,
+    )
+    return set(), set(), False
 
 
 async def _admin_ids(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> set[int]:
-    ids, _ = await _fetch_admins(chat_id, context)
+    ids, _, _ = await _fetch_admins(chat_id, context)
     return ids
 
 
 async def _admin_usernames(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> set[str]:
-    _, names = await _fetch_admins(chat_id, context)
+    _, names, _ = await _fetch_admins(chat_id, context)
     return names
+
+
+async def _admins_known(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    _, _, known = await _fetch_admins(chat_id, context)
+    return known
 
 
 async def _bot_rights(
@@ -606,6 +655,12 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await _is_exempt(msg, context):
         return
 
+    # Chưa biết ai là admin (mạng lỗi, chưa lấy được lần nào) thì KHÔNG xử phạt.
+    # Thà để lọt vài tin trong ít giây còn hơn ban nhầm admin - ban thì phải gỡ
+    # tay, mà admin bị ban còn mất luôn quyền gỡ.
+    if not await _admins_known(chat.id, context):
+        return
+
     cfg = _cfg(context)
     db = _db(context)
     rules = await _chat_rules(chat.id, context)
@@ -811,8 +866,13 @@ async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if msg.chat.type == ChatType.PRIVATE:
         return False
     # Trong nhóm: admin Telegram của nhóm cũng được.
-    if user.id in await _admin_ids(msg.chat_id, context):
+    ids, _, known = await _fetch_admins(msg.chat_id, context)
+    if user.id in ids:
         return True
+    if not known:
+        # Chưa biết ai là admin thì đừng xoá lệnh của người ta - có thể họ
+        # đúng là admin. Im lặng bỏ qua, họ gõ lại sau vài giây là được.
+        return False
     # Không đủ quyền: xoá lệnh, không phản hồi.
     try:
         await msg.delete()
@@ -2189,6 +2249,12 @@ def build_application(cfg: Config) -> Application:
         ApplicationBuilder()
         .token(cfg.token)
         .rate_limiter(AIORateLimiter())
+        # Mặc định của thư viện là 5 giây, hơi ngắn khi máy chủ ở xa Telegram
+        # (droplet Singapore) hoặc mạng nhà chập chờn -> hay dính "Timed out".
+        .connect_timeout(10.0)
+        .read_timeout(15.0)
+        .write_timeout(15.0)
+        .pool_timeout(10.0)
         .post_init(_post_init)
         .post_shutdown(_post_shutdown)
         .build()
