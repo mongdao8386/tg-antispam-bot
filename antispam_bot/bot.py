@@ -170,6 +170,30 @@ async def _service_kinds_for(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -
     return _cfg(context).delete_service
 
 
+async def _drop_group(chat_id: int, context: ContextTypes.DEFAULT_TYPE, ly_do: str) -> None:
+    """Bỏ một nhóm khỏi danh sách quản lý và dọn cache liên quan.
+
+    Gọi khi bot bị kick/đuổi. Không dọn thì mỗi lần /status hay kiểm tra quyền
+    lại đâm vào nhóm không còn vào được, sinh cảnh báo rác không dứt.
+    Dữ liệu của nhóm (từ cấm, seeding...) vẫn giữ nguyên trong DB, thêm bot
+    vào lại là dùng tiếp được.
+    """
+    db = _db(context)
+    groups = await _managed_groups(context)
+    if chat_id not in groups:
+        return
+    groups.remove(chat_id)
+    await db.set_setting("home_group", ",".join(str(g) for g in groups))
+    context.application.bot_data.get("rules_cache", {}).pop(chat_id, None)
+    context.application.bot_data.get("admin_cache", {}).pop(chat_id, None)
+    context.application.bot_data.setdefault("rights_warned", set()).discard(chat_id)
+    log.info(
+        "Đã bỏ nhóm %s khỏi danh sách quản lý (%s). Còn %d nhóm. "
+        "Thêm bot vào lại là nhóm tự quay lại danh sách.",
+        chat_id, ly_do, len(groups),
+    )
+
+
 async def _managed_groups(context: ContextTypes.DEFAULT_TYPE) -> list[int]:
     """Danh sách nhóm đã đăng ký bằng /setgroup."""
     raw = await _db(context).get_setting("home_group")
@@ -212,6 +236,9 @@ async def _fetch_admins(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> tup
         admins = await context.bot.get_chat_administrators(chat_id)
         ids = {a.user.id for a in admins}
         names = {a.user.username.lower() for a in admins if a.user.username}
+    except Forbidden as exc:
+        await _drop_group(chat_id, context, str(exc))
+        ids, names = set(), set()
     except TelegramError as exc:
         log.warning("Không lấy được danh sách admin của %s: %s", chat_id, exc)
         ids = hit[1] if hit else set()
@@ -236,6 +263,11 @@ async def _bot_rights(
     """(là admin, xoá được tin, cấm được người, đang ẩn danh) của bot trong nhóm."""
     try:
         me = await context.bot.get_chat_member(chat_id, context.bot.id)
+    except Forbidden as exc:
+        # Bot đã bị kick/đuổi. Đây là chuyện bình thường, không phải sự cố:
+        # dọn nhóm khỏi danh sách rồi im, thay vì cảnh báo mỗi lần gọi.
+        await _drop_group(chat_id, context, str(exc))
+        return False, False, False, False
     except TelegramError as exc:
         log.warning("Không kiểm tra được quyền của bot trong %s: %s", chat_id, exc)
         return False, False, False, False
@@ -299,6 +331,7 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     status = upd.new_chat_member.status
     if status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
         log.info("Bot đã rời/bị đuổi khỏi nhóm %r (%s)", chat.title or chat.id, chat.id)
+        await _drop_group(chat.id, context, "bị kick khỏi nhóm")
         return
 
     # Quyền vừa đổi -> kiểm tra lại từ đầu.
