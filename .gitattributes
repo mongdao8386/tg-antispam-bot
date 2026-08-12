@@ -1,0 +1,19 @@
+# Script chạy trên Linux BẮT BUỘC dùng xuống dòng LF.
+# Nếu lọt CRLF (kiểu Windows), bash trên droplet báo lỗi rất khó hiểu:
+#   /bin/bash^M: bad interpreter: No such file or directory
+*.sh text eol=lf
+
+# File .bat chỉ chạy trên Windows nên giữ CRLF.
+*.bat text eol=crlf
+
+# Mặc định cho mã nguồn: chuẩn hoá về LF trong kho.
+*.py text eol=lf
+*.txt text eol=lf
+*.md text eol=lf
+.env.example text eol=lf
+
+# Dữ liệu nhị phân: đừng đụng vào.
+*.traineddata binary
+*.db binary
+*.png binary
+*.jpg binary

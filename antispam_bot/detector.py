@@ -173,6 +173,12 @@ class MessageFacts:
     prior_offences: int = 0
     has_qr: bool = False
     qr_payloads: list[str] = field(default_factory=list)
+    # Chữ OCR đọc được trong ảnh. CỐ Ý tách khỏi `text`: chỉ dùng để soi từ khoá,
+    # không dùng để rút link/@ vì OCR đọc sai một ký tự là ra domain ma.
+    ocr_text: str = ""
+    # Tin thuần chữ và đang hỏi ("nhóm này có lừa đảo không?"). bot.py chỉ bật
+    # cờ này khi không kèm link/ảnh/@, nên không lách được bằng dấu ?.
+    is_question: bool = False
 
 
 @dataclass
@@ -270,23 +276,31 @@ def analyse(facts: MessageFacts, cfg: Config) -> Verdict:
     v = Verdict(threshold=max(1, threshold))
 
     text = facts.text or ""
-    # Nội dung giải từ QR cũng được quét từ khoá như chữ trong tin nhắn.
-    scannable = " ".join([text, *facts.qr_payloads]).strip()
+    # Nội dung QR và chữ OCR trong ảnh cũng được soi từ khoá như chữ tin nhắn.
+    # Riêng `text` (dùng cho luật link/@/số tài khoản) thì giữ nguyên bản gốc.
+    scannable = " ".join([text, *facts.qr_payloads, facts.ocr_text]).strip()
     haystack = normalize(scannable)
     squeezed = squeeze(scannable)
 
     # --- Từ khoá ---
-    if haystack:
+    # Câu hỏi thuần chữ thì bỏ qua hẳn phần từ khoá: hỏi "có lừa đảo không?"
+    # không phải là quảng cáo lừa đảo. Các luật khác vẫn chạy bình thường.
+    if haystack and not facts.is_question:
         _count_keywords(haystack, squeezed, v)
 
     # --- Chuyển tiếp ---
     if facts.is_forward:
         block_fwd = cfg.block_forwards and (not cfg.block_forwards_new_only or facts.is_new_member)
-        if block_fwd:
-            label = f" từ {facts.forward_label}" if facts.forward_label else ""
-            v.add(v.threshold, f"tin nhắn chuyển tiếp{label}")
-        else:
+        label = f" từ {facts.forward_label}" if facts.forward_label else ""
+        if not block_fwd:
             v.add(1, "tin nhắn chuyển tiếp")
+        elif facts.has_media and not facts.has_qr:
+            # Chuyển tiếp kèm ảnh: ảnh đã được soi QR và đọc chữ ở trên. Nếu
+            # có gì xấu thì các luật khác đã cộng điểm rồi. Ảnh sạch thì đừng
+            # ban chỉ vì nó là forward - chia sẻ ảnh là chuyện bình thường.
+            v.add(1, f"chuyển tiếp kèm ảnh{label} (ảnh đã soi, không thấy QR)")
+        else:
+            v.add(v.threshold, f"tin nhắn chuyển tiếp{label}")
 
     # --- Gửi dưới danh nghĩa kênh ---
     if facts.from_channel and cfg.block_channel_senders:

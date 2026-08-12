@@ -90,3 +90,36 @@ def obfuscation_score(text: str) -> int:
     if re.search(r"(?:\w[.\-_*|]){4,}\w", text):
         score += 2
     return score
+
+
+# Dấu hiệu người dùng đang HỎI chứ không khẳng định. Người vào nhóm hỏi
+# "nhóm này có uy tín không?" là người cẩn thận, không phải kẻ phá hoại -
+# ban họ là mất người dùng thật.
+_QUESTION_PATTERNS = (
+    # "có ... không / ko / k / hông / hem"
+    r"\bco\b.{0,40}\b(khong|ko|k|hong|hem)\b",
+    # đuôi nghi vấn phổ biến
+    r"\b(phai khong|dung khong|that khong|co that|thuc hu|hay khong)\b",
+    # mở đầu bằng lời hỏi
+    r"\b(cho hoi|cho minh hoi|cho em hoi|xin hoi|hoi chut|ai biet|"
+    r"co ai biet|ai tung|ad oi|admin oi|anh chi oi|moi nguoi oi)\b",
+    # từ để hỏi
+    r"\b(the nao|nhu nao|nhu the nao|sao vay|tai sao|vi sao|co nen|nen khong)\b",
+    # tiểu từ nghi vấn cuối câu
+    r"\b(vay a|vay ta|ha ban|nhi|the a|a\?)\s*$",
+)
+_QUESTION_RE = re.compile("|".join(_QUESTION_PATTERNS))
+
+
+def looks_like_question(text: str) -> bool:
+    """Câu này là đang hỏi hay đang khẳng định?
+
+    Dùng để KHÔNG ban người hỏi "nhóm này có lừa đảo không?". Chỉ nên tin kết
+    quả này khi tin nhắn không kèm link/ảnh/@ - xem cách dùng trong bot.py,
+    nếu không kẻ spam chỉ cần chấm thêm dấu ? là thoát.
+    """
+    if not text:
+        return False
+    if "?" in text:
+        return True
+    return bool(_QUESTION_RE.search(normalize(text)))

@@ -5,3 +5,8 @@ python-dotenv>=1.0.1
 # chỉ mất khả năng quét QR (xem SCAN_QR trong .env).
 opencv-python-headless>=4.9
 
+
+# Để đọc chữ nằm trong ảnh (OCR). Cần cả gói hệ thống:
+#   apt install tesseract-ocr tesseract-ocr-vie
+# Không có thì bot vẫn chạy, chỉ mất khả năng soi chữ in trên ảnh (xem SCAN_OCR).
+pytesseract>=0.3.10

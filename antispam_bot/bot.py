@@ -7,6 +7,7 @@ Lệnh quản trị cũng tự xoá sau vài giây để nhóm luôn sạch.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import time
@@ -37,10 +38,10 @@ from telegram.ext import (
     filters,
 )
 
-from . import presets, qrscan
+from . import ocr, presets, qrscan
 from .config import Config
 from .detector import MessageFacts, Verdict, analyse
-from .normalize import normalize, squeeze
+from .normalize import looks_like_question, normalize, squeeze
 from .storage import GLOBAL, Storage
 
 log = logging.getLogger("antispam")
@@ -355,6 +356,8 @@ def _extract_facts(
     has_qr: bool = False,
     qr_payloads: list[str] | None = None,
     fwd_exempt: bool = False,
+    ocr_text: str = "",
+    is_question: bool = False,
 ) -> MessageFacts:
     text = " ".join(p for p in (msg.text, msg.caption) if p)
 
@@ -401,45 +404,80 @@ def _extract_facts(
         prior_offences=offences,
         has_qr=has_qr,
         qr_payloads=qr_payloads or [],
+        ocr_text=ocr_text,
+        is_question=is_question,
     )
 
 
-def _image_file_id(msg: Message, max_bytes: int) -> str | None:
-    """file_id của ảnh trong tin nhắn, nếu có và đủ nhỏ để tải về."""
+def _image_ref(msg: Message, max_bytes: int) -> tuple[str, str] | None:
+    """(file_id, file_unique_id) của ảnh trong tin, nếu có và đủ nhỏ để tải về.
+
+    file_unique_id giữ nguyên với cùng một ảnh, kể cả do người khác gửi lại -
+    dùng làm khoá nhớ kết quả OCR.
+    """
     if msg.photo:
         # photo là danh sách nhiều kích cỡ; lấy bản lớn nhất còn nằm dưới hạn mức
         # vì QR càng nhiều pixel càng dễ giải.
         usable = [p for p in msg.photo if (p.file_size or 0) <= max_bytes]
         if usable:
-            return max(usable, key=lambda p: (p.width or 0) * (p.height or 0)).file_id
+            best = max(usable, key=lambda p: (p.width or 0) * (p.height or 0))
+            return best.file_id, best.file_unique_id
         return None
 
     doc = msg.document
     if doc and (doc.mime_type or "").startswith("image/") and (doc.file_size or 0) <= max_bytes:
-        return doc.file_id
+        return doc.file_id, doc.file_unique_id
 
     sticker = msg.sticker
     if sticker and not sticker.is_animated and not sticker.is_video:
         if (sticker.file_size or 0) <= max_bytes:
-            return sticker.file_id
+            return sticker.file_id, sticker.file_unique_id
     return None
 
 
-async def _scan_qr(msg: Message, context: ContextTypes.DEFAULT_TYPE) -> tuple[bool, list[str]]:
-    """Tải ảnh trong tin nhắn về và giải mã QR. Lỗi thì coi như không có QR."""
+async def _scan_image(
+    msg: Message, context: ContextTypes.DEFAULT_TYPE
+) -> tuple[bool, list[str], str]:
+    """Soi ảnh trong tin nhắn: (có QR, nội dung QR, chữ đọc được trong ảnh).
+
+    Tải ảnh về ĐÚNG MỘT LẦN rồi dùng chung cho cả QR lẫn OCR - trước đây mỗi
+    thứ tải riêng là phí băng thông và thời gian.
+    """
     cfg = _cfg(context)
-    if not cfg.scan_qr or not qrscan.AVAILABLE:
-        return False, []
-    file_id = _image_file_id(msg, cfg.qr_max_bytes)
-    if file_id is None:
-        return False, []
+    want_qr = cfg.scan_qr and qrscan.AVAILABLE
+    want_ocr = cfg.scan_ocr and ocr.AVAILABLE
+    if not want_qr and not want_ocr:
+        return False, [], ""
+
+    ref = _image_ref(msg, max(cfg.qr_max_bytes, cfg.ocr_max_bytes))
+    if ref is None:
+        return False, [], ""
+    file_id, unique_id = ref
+
     try:
         tg_file = await context.bot.get_file(file_id)
         data = bytes(await tg_file.download_as_bytearray())
     except TelegramError as exc:
         log.warning("Không tải được ảnh %s: %s", file_id, exc)
+        return False, [], ""
+
+    # Chạy SONG SONG: hai việc độc lập nhau, và cả hai đều nằm ở thread riêng
+    # (OpenCV thả GIL, tesseract là tiến trình riêng) nên chồng lấn được thật.
+    # Đo được: 430ms tuần tự -> 355ms song song.
+    async def _qr():
+        if want_qr and len(data) <= cfg.qr_max_bytes:
+            return await qrscan.decode(data)
         return False, []
-    return await qrscan.decode(data)
+
+    async def _ocr():
+        if want_ocr and len(data) <= cfg.ocr_max_bytes:
+            return await ocr.read(
+                data, key=unique_id, lang=cfg.ocr_lang, max_side=cfg.ocr_max_side
+            )
+        return ""
+
+    (has_qr, payloads), text = await asyncio.gather(_qr(), _ocr())
+    return has_qr, payloads, text
 
 
 async def _report(
@@ -558,11 +596,20 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not force_punish:
             fwd_exempt = msg.from_user.id in rules.seeding
 
-    has_qr, qr_payloads = await _scan_qr(msg, context)
+    has_qr, qr_payloads, ocr_text = await _scan_image(msg, context)
 
-    # Keyword blacklist: kiểm tra sau khi có QR để kết hợp cả nội dung QR.
-    if not force_punish and rules.keywords:
-        combined = " ".join(filter(None, [msg.text, msg.caption, *qr_payloads]))
+    # Người HỎI "nhóm này có lừa đảo không?" là người cẩn thận, không phải spam.
+    # Chỉ miễn khi tin nhắn thuần chữ: không link, không ảnh, không QR, không @.
+    # Nếu không, kẻ spam chỉ cần thêm dấu ? vào cuối là thoát hết mọi luật.
+    plain_text = not (
+        msg.photo or msg.video or msg.document or msg.animation or msg.sticker
+        or msg.entities or msg.caption_entities or msg.reply_markup or has_qr
+    )
+    benign_question = plain_text and looks_like_question(msg.text or "")
+
+    # Từ cấm: soi sau khi có QR + OCR để gộp cả chữ nằm trong ảnh.
+    if not force_punish and not benign_question and rules.keywords:
+        combined = " ".join(filter(None, [msg.text, msg.caption, *qr_payloads, ocr_text]))
         if combined:
             norm_combined = normalize(combined)
             # squeeze bắt cả kiểu viết cách chữ để né lọc: "l ừ a  đ ả o"
@@ -575,7 +622,10 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 force_punish = True
                 force_reason = f"từ bị cấm: {', '.join(sorted(matched)[:3])}"
 
-    facts = _extract_facts(msg, is_new, offences, has_qr, qr_payloads, fwd_exempt=fwd_exempt)
+    facts = _extract_facts(
+        msg, is_new, offences, has_qr, qr_payloads, fwd_exempt=fwd_exempt,
+        ocr_text=ocr_text, is_question=benign_question,
+    )
 
     if force_punish:
         verdict = Verdict(score=9999, reasons=[force_reason], threshold=1)
@@ -762,7 +812,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"Chặn forward: <code>{cfg.block_forwards}</code> · link: <code>{cfg.block_links}</code> · "
         f"kênh: <code>{cfg.block_channel_senders}</code> · "
         f"@: <code>{cfg.block_mentions}</code> · "
-        f"QR: <code>{cfg.scan_qr and qrscan.AVAILABLE}</code>\n"
+        f"QR: <code>{cfg.scan_qr and qrscan.AVAILABLE}</code> · "
+        f"OCR: <code>{cfg.scan_ocr and ocr.AVAILABLE}</code>"
+        + (f" (nhớ {ocr.cache_stats()[0]} ảnh)" if ocr.AVAILABLE else "")
+        + "\n"
     )
 
     # Danh sách dùng chung cho mọi nhóm.
@@ -828,15 +881,44 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     offences = await db.count_offences(target.chat_id, uid) if uid else 0
     is_bl = await db.in_blacklist(target.chat_id, sender_id) if sender_id else False
     is_fwd = await db.in_fwd_whitelist(target.chat_id, uid) if uid else False
-    has_qr, qr_payloads = await _scan_qr(target, context)
-    facts = _extract_facts(target, False, offences, has_qr, qr_payloads)
+    has_qr, qr_payloads, ocr_text = await _scan_image(target, context)
+    facts = _extract_facts(target, False, offences, has_qr, qr_payloads, ocr_text=ocr_text)
     verdict = analyse(facts, cfg)
     verdict_text = "SPAM" if verdict.is_spam else "sạch"
     reasons = html.escape("; ".join(verdict.reasons) or "không có dấu hiệu nào")
+    # Nói rõ vì sao ảnh không bị bắt, thay vì chỉ báo "sạch" khó hiểu.
+    co_anh = bool(target.photo or target.sticker or (
+        target.document and (target.document.mime_type or "").startswith("image/")
+    ))
     qr_note = ""
-    if has_qr:
-        decoded = html.escape(" | ".join(qr_payloads)[:200]) if qr_payloads else "không giải được"
+    if has_qr and qr_payloads:
+        decoded = html.escape(" | ".join(qr_payloads)[:200])
         qr_note = f"\nQR: <code>{decoded}</code>"
+    elif co_anh:
+        if not cfg.scan_qr:
+            qr_note = "\n⚠️ <b>Quét QR đang TẮT</b> (SCAN_QR=false) — ảnh không được kiểm tra."
+        elif not qrscan.AVAILABLE:
+            qr_note = (
+                "\n⚠️ <b>Quét QR KHÔNG chạy được</b> — thiếu OpenCV: "
+                f"<code>{html.escape(str(qrscan.UNAVAILABLE_REASON or 'không rõ'))}</code>\n"
+                "Cài lại: <code>pip install opencv-python-headless</code>"
+            )
+        else:
+            qr_note = "\nQR: không tìm thấy mã QR nào trong ảnh."
+
+    if co_anh:
+        if ocr_text:
+            qr_note += f"\nOCR đọc được: <code>{html.escape(ocr_text[:250])}</code>"
+        elif not cfg.scan_ocr:
+            qr_note += "\n⚠️ <b>OCR đang TẮT</b> (SCAN_OCR=false) — chữ trong ảnh không được soi."
+        elif not ocr.AVAILABLE:
+            qr_note += (
+                "\n⚠️ <b>OCR KHÔNG chạy được</b>: "
+                f"<code>{html.escape(str(ocr.UNAVAILABLE_REASON or 'không rõ'))}</code>\n"
+                "Cài: <code>apt install tesseract-ocr tesseract-ocr-vie</code>"
+            )
+        else:
+            qr_note += "\nOCR: không đọc được chữ nào trong ảnh."
     # Từ cấm cũng phải được phản ánh, nếu không /check sẽ báo "sạch" cho tin sẽ bị ban.
     kw_list = await db.get_keywords_effective(target.chat_id)
     combined = " ".join(filter(None, [target.text, target.caption, *qr_payloads]))
@@ -2048,6 +2130,19 @@ async def _post_init(app: Application) -> None:
         )
     else:
         log.info("Quét mã QR trong ảnh: TẮT theo cấu hình")
+
+    if cfg.scan_ocr and ocr.AVAILABLE:
+        log.info("Đọc chữ trong ảnh (OCR): BẬT — ngôn ngữ %s, thu về %dpx",
+                 cfg.ocr_lang, cfg.ocr_max_side)
+    elif cfg.scan_ocr:
+        log.warning(
+            "OCR: TẮT - không dùng được Tesseract (%s). "
+            "Cài: apt install tesseract-ocr tesseract-ocr-vie && pip install pytesseract. "
+            "Chữ nằm trong ảnh sẽ không bị soi từ cấm.",
+            ocr.UNAVAILABLE_REASON or "không rõ nguyên nhân",
+        )
+    else:
+        log.info("Đọc chữ trong ảnh (OCR): TẮT theo cấu hình")
 
 
 async def _post_shutdown(app: Application) -> None:

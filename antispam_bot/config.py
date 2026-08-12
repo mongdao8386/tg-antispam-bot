@@ -117,6 +117,11 @@ class Config:
     scan_qr: bool = True
     qr_max_bytes: int = 5_000_000
 
+    scan_ocr: bool = True
+    ocr_max_bytes: int = 5_000_000
+    ocr_lang: str = "vie+eng"
+    ocr_max_side: int = 1600
+
     delete_service: set[str] = field(default_factory=set)
 
     whitelist_domains: set[str] = field(default_factory=set)
@@ -168,6 +173,10 @@ class Config:
             block_mentions=_bool("BLOCK_MENTIONS", True),
             scan_qr=_bool("SCAN_QR", True),
             qr_max_bytes=_int("QR_MAX_BYTES", 5_000_000),
+            scan_ocr=_bool("SCAN_OCR", True),
+            ocr_max_bytes=_int("OCR_MAX_BYTES", 5_000_000),
+            ocr_lang=(os.getenv("OCR_LANG") or "vie+eng").strip(),
+            ocr_max_side=_int("OCR_MAX_SIDE", 1600),
             delete_service=_service_kinds("DELETE_SERVICE_MESSAGES", "join,leave,pin"),
             whitelist_domains=_domain_list(
                 "WHITELIST_DOMAINS",

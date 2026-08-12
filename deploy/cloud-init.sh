@@ -20,6 +20,8 @@ apt-get update
 apt-get install -y python3-venv python3-pip ufw unattended-upgrades
 # opencv-python-headless cần glib. Ubuntu 24.04 đổi tên gói thành ...0t64.
 apt-get install -y libglib2.0-0t64 || apt-get install -y libglib2.0-0
+# OCR: bộ nhận dạng + dữ liệu tiếng Việt (thiếu gói -vie thì đọc sai dấu bét nhè).
+apt-get install -y tesseract-ocr tesseract-ocr-vie
 
 # Swap 1GB: gói droplet nhỏ dễ hết RAM lúc pip biên dịch numpy/opencv.
 if [ ! -f /swapfile ]; then
@@ -48,7 +50,8 @@ sudo -u antispam /opt/antispam/venv/bin/pip install --upgrade pip wheel
 sudo -u antispam /opt/antispam/venv/bin/pip install \
     'python-telegram-bot[job-queue,rate-limiter]>=21.6,<23' \
     'python-dotenv>=1.0.1' \
-    'opencv-python-headless>=4.9'
+    'opencv-python-headless>=4.9' \
+    'pytesseract>=0.3.10'
 
 # Dịch vụ systemd: tự chạy lại khi sập, tự bật khi khởi động lại máy.
 cat >/etc/systemd/system/antispam.service <<'UNIT'
