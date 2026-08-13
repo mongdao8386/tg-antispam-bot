@@ -114,6 +114,11 @@ class Config:
     block_channel_senders: bool = True
     block_mentions: bool = True
 
+    # Phanh tự động: ban quá nhiều trong thời gian ngắn thường là dấu hiệu một
+    # luật mới đang bắt oan hàng loạt, chứ không phải bị tấn công thật.
+    brake_limit: int = 5
+    brake_window: int = 60
+
     scan_qr: bool = True
     qr_max_bytes: int = 5_000_000
 
@@ -171,6 +176,8 @@ class Config:
             block_links_new_only=_bool("BLOCK_LINKS_NEW_ONLY", False),
             block_channel_senders=_bool("BLOCK_CHANNEL_SENDERS", True),
             block_mentions=_bool("BLOCK_MENTIONS", True),
+            brake_limit=_int("BRAKE_LIMIT", 5),
+            brake_window=_int("BRAKE_WINDOW", 60),
             scan_qr=_bool("SCAN_QR", True),
             qr_max_bytes=_int("QR_MAX_BYTES", 5_000_000),
             scan_ocr=_bool("SCAN_OCR", True),

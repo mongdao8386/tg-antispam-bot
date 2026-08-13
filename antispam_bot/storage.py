@@ -88,7 +88,21 @@ class Storage:
         # cuối nếu MẤT ĐIỆN đột ngột) nhưng bỏ được fsync mỗi lần commit.
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Thêm cột mới vào bảng đã tồn tại từ bản cũ.
+
+        CREATE TABLE IF NOT EXISTS không đụng tới bảng đã có, nên cột thêm sau
+        phải tự vá ở đây - nếu không, database cũ sẽ thiếu cột và sập.
+        """
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(offences)")}
+        if "name" not in cols:
+            # Lưu tên người bị xử lý để /lastbans đọc được, khỏi phải gọi API.
+            self._conn.execute(
+                "ALTER TABLE offences ADD COLUMN name TEXT NOT NULL DEFAULT ''"
+            )
 
     def close(self) -> None:
         self._conn.close()
@@ -166,19 +180,45 @@ class Storage:
         return await self._run(self._count_offences, chat_id, user_id)
 
     def _log_offence(
-        self, chat_id: int, user_id: int, score: int, action: str, reasons: str, excerpt: str
+        self, chat_id: int, user_id: int, score: int, action: str,
+        reasons: str, excerpt: str, name: str,
     ) -> None:
         self._conn.execute(
-            "INSERT INTO offences (chat_id, user_id, ts, score, action, reasons, excerpt) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (chat_id, user_id, int(time.time()), score, action, reasons, excerpt[:400]),
+            "INSERT INTO offences (chat_id, user_id, ts, score, action, reasons, excerpt, name) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (chat_id, user_id, int(time.time()), score, action, reasons, excerpt[:400], name[:80]),
         )
         self._conn.commit()
 
     async def log_offence(
-        self, chat_id: int, user_id: int, score: int, action: str, reasons: str, excerpt: str = ""
+        self, chat_id: int, user_id: int, score: int, action: str,
+        reasons: str, excerpt: str = "", name: str = "",
     ) -> None:
-        await self._run(self._log_offence, chat_id, user_id, score, action, reasons, excerpt)
+        await self._run(
+            self._log_offence, chat_id, user_id, score, action, reasons, excerpt, name
+        )
+
+    def _recent_bans(self, limit: int) -> list[tuple]:
+        cur = self._conn.execute(
+            "SELECT id, chat_id, user_id, ts, score, reasons, excerpt, name "
+            "FROM offences WHERE action IN ('ban','mute') ORDER BY ts DESC, id DESC LIMIT ?",
+            (limit,),
+        )
+        return cur.fetchall()
+
+    async def recent_bans(self, limit: int = 10) -> list[tuple]:
+        """Các lượt ban/mute gần nhất trên MỌI nhóm, mới nhất trước."""
+        return await self._run(self._recent_bans, limit)
+
+    def _count_recent_bans(self, seconds: int) -> int:
+        cur = self._conn.execute(
+            "SELECT COUNT(*) FROM offences WHERE action IN ('ban','mute') AND ts >= ?",
+            (int(time.time()) - seconds,),
+        )
+        return int(cur.fetchone()[0])
+
+    async def count_recent_bans(self, seconds: int = 60) -> int:
+        return await self._run(self._count_recent_bans, seconds)
 
     def _clear_offences(self, chat_id: int, user_id: int) -> int:
         cur = self._conn.execute(

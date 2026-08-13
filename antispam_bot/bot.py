@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -21,6 +22,8 @@ from telegram import (
     BotCommandScopeDefault,
     Chat,
     ChatPermissions,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     Message,
     MessageEntity,
     Update,
@@ -31,6 +34,7 @@ from telegram.ext import (
     AIORateLimiter,
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
     ChatMemberHandler,
     CommandHandler,
     ContextTypes,
@@ -38,8 +42,8 @@ from telegram.ext import (
     filters,
 )
 
-from . import ocr, presets, qrscan
-from .config import Config
+from . import control, ocr, presets, qrscan
+from .config import VALID_ACTIONS, Config
 from .detector import MessageFacts, Verdict, analyse
 from .normalize import looks_like_question, normalize, squeeze
 from .storage import GLOBAL, Storage
@@ -49,6 +53,16 @@ log = logging.getLogger("antispam")
 ADMIN_CACHE_TTL = 300  # giây - thời gian tin dùng danh sách admin đã lấy được
 ADMIN_RETRY = 20       # giây - lấy hụt thì thử lại sau chừng này, đừng ôm 5 phút
 ADMIN_TRIES = 3        # số lần thử khi mạng chập chờn
+IMAGE_TRIES = 2        # số lần thử tải ảnh - "Timed out" gần như luôn là tạm thời
+# Tải ảnh nặng hơn hẳn một lệnh API thường nên cho nó thời gian rộng hơn 15 giây
+# chung, thay vì nới read_timeout toàn cục (làm mọi lệnh khác chậm báo lỗi).
+IMAGE_READ_TIMEOUT = 20.0
+# Trần cứng cho CẢ quá trình tải kể cả thử lại. Bot xử lý tin tuần tự, nên một
+# tấm ảnh không tải nổi mà cứ thử mãi sẽ treo toàn bộ nhóm khác. Quét được một
+# tấm ảnh không đáng để bot đứng hình lâu hơn chừng này.
+IMAGE_TOTAL_BUDGET = 30.0
+# Cắt đuôi "(+3)" trong lý do khi gửi log - người đọc không cần con số
+_RE_DIEM = re.compile(r"\s*\(\+\d+\)\s*$")
 RULES_CACHE_TTL = 60   # giây - lệnh admin xoá cache ngay nên đây chỉ là lưới an toàn
 SELF_DESTRUCT = 20     # giây - thời gian sống của phản hồi lệnh quản trị
 
@@ -536,11 +550,42 @@ async def _scan_image(
         return False, [], ""
     file_id, unique_id = ref
 
+    async def _tai_anh() -> bytes | None:
+        """Tải ảnh, thử lại vài lần khi mạng chập chờn. None nghĩa là bỏ cuộc."""
+        nonlocal so_lan, last_exc
+        for lan in range(IMAGE_TRIES):
+            so_lan = lan + 1
+            try:
+                tg_file = await context.bot.get_file(file_id)
+                return bytes(await tg_file.download_as_bytearray(read_timeout=IMAGE_READ_TIMEOUT))
+            except BadRequest as exc:
+                # Phải đứng TRƯỚC NetworkError: trong thư viện này BadRequest kế
+                # thừa NetworkError, mà "file quá lớn"/"file_id sai" thì thử lại vô ích.
+                last_exc = exc
+                return None
+            except NetworkError as exc:   # gồm cả TimedOut
+                last_exc = exc
+                if lan + 1 < IMAGE_TRIES:
+                    await asyncio.sleep(0.5 * (lan + 1))
+            except TelegramError as exc:
+                last_exc = exc
+                return None
+        return None
+
+    so_lan = 0
+    last_exc: TelegramError | None = None
     try:
-        tg_file = await context.bot.get_file(file_id)
-        data = bytes(await tg_file.download_as_bytearray())
-    except TelegramError as exc:
-        log.warning("Không tải được ảnh %s: %s", file_id, exc)
+        data = await asyncio.wait_for(_tai_anh(), timeout=IMAGE_TOTAL_BUDGET)
+    except asyncio.TimeoutError:
+        log.warning(
+            "Bỏ qua ảnh %s: quá %.0f giây vẫn chưa tải xong, không để bot đứng hình",
+            file_id,
+            IMAGE_TOTAL_BUDGET,
+        )
+        return False, [], ""
+
+    if data is None:
+        log.warning("Không tải được ảnh %s sau %d lần: %s", file_id, so_lan, last_exc)
         return False, [], ""
 
     # Chạy SONG SONG: hai việc độc lập nhau, và cả hai đều nằm ở thread riêng
@@ -578,12 +623,14 @@ async def _report(
     cfg = _cfg(context)
     if not cfg.log_chat_id:
         return
+    # Bỏ điểm/ngưỡng: luật đã chỉnh chuẩn rồi, đọc log chỉ cần biết ai - vì sao.
+    # Lý do cũng cắt luôn phần "(+3)" cho gọn.
+    ly_do = "; ".join(_RE_DIEM.sub("", r).strip() for r in verdict.reasons)
     body = (
         f"🛡 <b>{html.escape(action.upper())}</b>\n"
         f"Nhóm: {html.escape(chat.title or str(chat.id))} (<code>{chat.id}</code>)\n"
         f"Người gửi: {html.escape(who)} (<code>{uid}</code>)\n"
-        f"Điểm: <b>{verdict.score}</b>/{verdict.threshold}\n"
-        f"Lý do: {html.escape('; '.join(verdict.reasons))}\n"
+        f"Lý do: {html.escape(ly_do)}\n"
         f"Nội dung:\n<pre>{html.escape(excerpt)}</pre>"
     )
     try:
@@ -597,7 +644,45 @@ async def _report(
         log.warning("Không gửi được log tới %s: %s%s", cfg.log_chat_id, exc, goi_y)
 
 
-async def _punish(context: ContextTypes.DEFAULT_TYPE, msg: Message) -> str:
+async def _check_brake(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ban dồn dập trong thời gian ngắn -> tự chuyển sang chế độ chỉ ghi log.
+
+    Ban hàng loạt gần như luôn là dấu hiệu một luật đang bắt oan, chứ không
+    phải nhóm bị tấn công thật. Tự phanh lại rồi báo cho chủ bot vẫn hơn là
+    quét sạch nhóm rồi mới phát hiện.
+    """
+    cfg = _cfg(context)
+    if cfg.brake_limit <= 0:
+        return
+    db = _db(context)
+    if await db.count_recent_bans(cfg.brake_window) < cfg.brake_limit:
+        return
+    if await control.effective_action(db, cfg) == "report":
+        return  # đã phanh rồi
+
+    await control.set_action(db, "report")
+    await control.note_brake(db)
+    log.error(
+        "PHANH TỰ ĐỘNG: đã xử lý >= %d người trong %d giây. Chuyển sang chế độ "
+        "chỉ ghi log. Kiểm tra /lastbans rồi bật lại bằng /action ban.",
+        cfg.brake_limit, cfg.brake_window,
+    )
+    loi_nhan = (
+        "🛑 <b>Bot đã tự phanh</b>\n\n"
+        f"Vừa xử lý <b>{cfg.brake_limit}+</b> người trong {cfg.brake_window} giây — "
+        "thường là dấu hiệu một luật đang bắt oan hàng loạt.\n\n"
+        "Bot chuyển sang <b>chỉ ghi log</b>, không ban nữa.\n\n"
+        "Xem /lastbans để kiểm tra. Đúng thì /action ban để bật lại, "
+        "sai thì /undo để gỡ."
+    )
+    for oid in cfg.owner_ids:
+        try:
+            await context.bot.send_message(oid, loi_nhan, parse_mode="HTML")
+        except TelegramError:
+            pass
+
+
+async def _punish(context: ContextTypes.DEFAULT_TYPE, msg: Message, action: str) -> str:
     """Thực thi hình phạt. Trả về hành động thực tế đã làm."""
     cfg = _cfg(context)
     chat_id = msg.chat_id
@@ -608,7 +693,7 @@ async def _punish(context: ContextTypes.DEFAULT_TYPE, msg: Message) -> str:
     except (BadRequest, Forbidden) as exc:
         log.warning("Không xoá được tin nhắn %s: %s", msg.message_id, exc)
 
-    if cfg.action == "delete":
+    if action == "delete":
         return "delete"
 
     # Người gửi là một kênh -> chặn cả kênh đó.
@@ -625,17 +710,17 @@ async def _punish(context: ContextTypes.DEFAULT_TYPE, msg: Message) -> str:
     uid = msg.from_user.id
 
     try:
-        if cfg.action == "ban":
+        if action == "ban":
             await context.bot.ban_chat_member(chat_id, uid, revoke_messages=True)
             return "ban"
-        if cfg.action == "mute":
+        if action == "mute":
             until = datetime.now(timezone.utc) + timedelta(seconds=cfg.mute_seconds)
             await context.bot.restrict_chat_member(chat_id, uid, MUTED, until_date=until)
             return "mute"
     except (BadRequest, Forbidden) as exc:
         log.warning("Không xử lý được user %s trong %s: %s", uid, chat_id, exc)
         return "delete"
-    return cfg.action
+    return action
 
 
 # ---------------------------------------------------------------------------
@@ -653,6 +738,12 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _warn_if_crippled(chat, context)
 
     if await _is_exempt(msg, context):
+        return
+
+    # Đang tạm ngưng (bấm nút hoặc /pause) thì bỏ qua hết, kể cả quét ảnh -
+    # ngưng là ngưng hẳn, đỡ tốn băng thông và CPU.
+    dang_ngung, _ = await control.is_paused(_db(context))
+    if dang_ngung:
         return
 
     # Chưa biết ai là admin (mạng lỗi, chưa lấy được lần nào) thì KHÔNG xử phạt.
@@ -724,12 +815,23 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not verdict.is_spam:
         return
 
-    action = "report" if cfg.action == "report" else await _punish(context, msg)
+    # Chế độ lúc chạy (đổi bằng /action hoặc do phanh tự động) đè lên .env.
+    che_do = await control.effective_action(db, cfg)
+    action = "report" if che_do == "report" else await _punish(context, msg, che_do)
+
     uid = msg.sender_chat.id if msg.sender_chat else (msg.from_user.id if msg.from_user else 0)
+    ten = (
+        msg.from_user.full_name if msg.from_user
+        else (msg.sender_chat.title if msg.sender_chat else "")
+    )
     await db.log_offence(
-        chat.id, uid, verdict.score, action, "; ".join(verdict.reasons), msg.text or msg.caption or ""
+        chat.id, uid, verdict.score, action, "; ".join(verdict.reasons),
+        msg.text or msg.caption or "", ten or "",
     )
     await _report(context, chat, msg, verdict, action)
+
+    if action in ("ban", "mute"):
+        await _check_brake(context)
 
 
 # Tin nhắn dịch vụ: thuộc tính trên Message ứng với từng nhóm.
@@ -1885,6 +1987,262 @@ async def cmd_anon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Bảng điều khiển bằng nút bấm — /panel
+# ---------------------------------------------------------------------------
+
+
+async def _panel_text(context: ContextTypes.DEFAULT_TYPE) -> str:
+    cfg = _cfg(context)
+    db = _db(context)
+    dang_ngung, con_lai = await control.is_paused(db)
+    che_do = await control.effective_action(db, cfg)
+    so_ban = await db.count_recent_bans(3600)
+    brake = await control.brake_info(db)
+
+    if dang_ngung:
+        phut = con_lai // 60
+        trang_thai = (
+            f"⏸ <b>ĐANG TẠM NGƯNG</b> — còn {phut} phút" if phut < 5000
+            else "⏸ <b>ĐANG TẠM NGƯNG</b> (vô thời hạn)"
+        )
+    elif che_do == "report":
+        trang_thai = "🧪 <b>CHẾ ĐỘ THỬ</b> — chỉ ghi log, không ban ai"
+    else:
+        trang_thai = f"✅ <b>ĐANG BẢO VỆ</b> — chế độ <code>{che_do}</code>"
+
+    canh_bao = ""
+    if brake and time.time() - brake < 86400:
+        khi = datetime.fromtimestamp(brake).strftime("%H:%M %d/%m")
+        canh_bao = f"\n\n🛑 Bot đã tự phanh lúc {khi}. Kiểm tra /lastbans trước khi bật lại."
+
+    return (
+        f"🛡 <b>Bảng điều khiển</b>\n\n{trang_thai}\n"
+        f"Đã xử lý 1 giờ qua: <b>{so_ban}</b> người{canh_bao}"
+    )
+
+
+def _panel_keyboard(dang_ngung: bool, che_do: str) -> InlineKeyboardMarkup:
+    hang1 = (
+        [InlineKeyboardButton("▶️ Bật lại", callback_data="p:resume")]
+        if dang_ngung
+        else [
+            InlineKeyboardButton("⏸ Ngưng 30'", callback_data="p:pause:30"),
+            InlineKeyboardButton("⏸ Ngưng 2h", callback_data="p:pause:120"),
+        ]
+    )
+    hang2 = (
+        [InlineKeyboardButton("🔨 Bật ban lại", callback_data="p:act:ban")]
+        if che_do == "report"
+        else [InlineKeyboardButton("🧪 Chế độ thử (không ban)", callback_data="p:act:report")]
+    )
+    return InlineKeyboardMarkup([
+        hang1,
+        hang2,
+        [
+            InlineKeyboardButton("📋 Ban gần đây", callback_data="p:last"),
+            InlineKeyboardButton("↩️ Gỡ ban vừa rồi", callback_data="p:undo"),
+        ],
+        [InlineKeyboardButton("🔄 Làm mới", callback_data="p:refresh")],
+    ])
+
+
+async def cmd_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/panel — bảng điều khiển bấm nút, dùng ngay trên điện thoại."""
+    if not await _require_admin(update, context):
+        return
+    db = _db(context)
+    dang_ngung, _ = await control.is_paused(db)
+    che_do = await control.effective_action(db, _cfg(context))
+    text = await _panel_text(context)
+    msg = update.effective_message
+    try:
+        sent = await msg.reply_html(text, reply_markup=_panel_keyboard(dang_ngung, che_do))
+    except TelegramError as exc:
+        log.warning("Không mở được bảng điều khiển: %s", exc)
+        return
+    # Trong nhóm thì tự dọn cho sạch; chat riêng thì giữ lại để bấm tiếp.
+    if msg.chat.type != ChatType.PRIVATE and context.job_queue:
+        context.job_queue.run_once(
+            _delete_later, SELF_DESTRUCT * 3, data=(msg.chat_id, [msg.message_id, sent.message_id])
+        )
+
+
+async def _bans_text(context: ContextTypes.DEFAULT_TYPE, limit: int = 10) -> str:
+    rows = await _db(context).recent_bans(limit)
+    if not rows:
+        return "Chưa có lượt xử lý nào."
+    ra = ["<b>Các lượt xử lý gần nhất</b>\n"]
+    for _id, chat_id, uid, ts, score, reasons, excerpt, name in rows:
+        khi = datetime.fromtimestamp(ts).strftime("%H:%M %d/%m")
+        ai = html.escape(name) if name else f"<code>{uid}</code>"
+        ly_do = html.escape(reasons[:90])
+        noi_dung = html.escape((excerpt or "").strip()[:60])
+        ra.append(
+            f"• {khi} — {ai} (<code>{uid}</code>)\n"
+            f"   {ly_do}\n"
+            + (f"   “{noi_dung}”\n" if noi_dung else "")
+        )
+    ra.append("\nGỡ một người: <code>/unban &lt;user_id&gt;</code>")
+    return "\n".join(ra)
+
+
+async def cmd_lastbans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/lastbans — xem các lượt xử lý gần nhất kèm lý do."""
+    if not await _require_admin(update, context):
+        return
+    await _quiet_reply(update, context, await _bans_text(context))
+
+
+async def _undo_last(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Gỡ lượt ban gần nhất. Trả về câu thông báo kết quả."""
+    rows = await _db(context).recent_bans(1)
+    if not rows:
+        return "Chưa có lượt ban nào để gỡ."
+    _id, chat_id, uid, ts, score, reasons, excerpt, name = rows[0]
+    ai = html.escape(name) if name else str(uid)
+    try:
+        await context.bot.unban_chat_member(chat_id, uid, only_if_banned=True)
+        await _db(context).clear_offences(chat_id, uid)
+        return (
+            f"↩️ Đã gỡ <b>{ai}</b> (<code>{uid}</code>) và xoá lịch sử vi phạm.\n"
+            f"Lý do bị ban: {html.escape(reasons[:120])}"
+        )
+    except TelegramError as exc:
+        return f"Không gỡ được <code>{uid}</code>: {html.escape(str(exc))}"
+
+
+async def cmd_undo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/undo — gỡ lượt ban gần nhất."""
+    if not await _require_admin(update, context):
+        return
+    await _quiet_reply(update, context, await _undo_last(context))
+
+
+async def cmd_pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/pause [số phút] — tạm ngưng xử phạt. Không ghi số thì ngưng vô thời hạn."""
+    if not await _require_admin(update, context):
+        return
+    phut = 0
+    if context.args:
+        try:
+            phut = int(context.args[0])
+        except ValueError:
+            phut = 0
+    await control.pause(_db(context), phut)
+    khi = f"{phut} phút" if phut > 0 else "vô thời hạn"
+    await _quiet_reply(
+        update, context,
+        f"⏸ Đã tạm ngưng xử phạt ({khi}). Bật lại bằng /resume hoặc /panel.",
+    )
+
+
+async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/resume — bật lại sau khi tạm ngưng."""
+    if not await _require_admin(update, context):
+        return
+    await control.resume(_db(context))
+    await _quiet_reply(update, context, "▶️ Đã bật lại. Bot đang bảo vệ nhóm.")
+
+
+async def cmd_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/action ban|mute|delete|report — đổi cách xử lý ngay, không cần khởi động lại."""
+    if not await _require_admin(update, context):
+        return
+    db = _db(context)
+    cfg = _cfg(context)
+    if not context.args:
+        hien_tai = await control.effective_action(db, cfg)
+        await _quiet_reply(
+            update, context,
+            f"Chế độ hiện tại: <code>{hien_tai}</code>\n\n"
+            "<code>/action ban</code> — xoá tin + cấm vĩnh viễn\n"
+            "<code>/action mute</code> — xoá tin + cấm chat tạm thời\n"
+            "<code>/action delete</code> — chỉ xoá tin\n"
+            "<code>/action report</code> — chỉ ghi log, không đụng ai (chế độ thử)\n"
+            "<code>/action mac dinh</code> — quay về cài trong .env",
+        )
+        return
+    che_do = context.args[0].strip().lower()
+    if che_do in ("macdinh", "mac", "default", "reset"):
+        await control.clear_action(db)
+        await _quiet_reply(
+            update, context, f"Đã quay về cài trong .env: <code>{cfg.action}</code>"
+        )
+        return
+    if che_do not in VALID_ACTIONS:
+        await _quiet_reply(
+            update, context,
+            f"Không hiểu <code>{html.escape(che_do)}</code>. "
+            f"Chọn: {', '.join(VALID_ACTIONS)}",
+        )
+        return
+    await control.set_action(db, che_do)
+    ghi_chu = " — bot sẽ KHÔNG ban ai, chỉ ghi log" if che_do == "report" else ""
+    await _quiet_reply(update, context, f"Đã đổi sang <code>{che_do}</code>{ghi_chu}.")
+
+
+async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Xử lý nút bấm trên bảng điều khiển."""
+    q = update.callback_query
+    if q is None:
+        return
+    user = q.from_user
+    cfg = _cfg(context)
+    db = _db(context)
+
+    # Nút chỉ dành cho owner / bot admin — người khác bấm thì báo và thôi.
+    duoc = user.id in cfg.owner_ids or await db.is_bot_admin(user.id)
+    if not duoc and q.message and q.message.chat.type != ChatType.PRIVATE:
+        duoc = user.id in await _admin_ids(q.message.chat_id, context)
+    if not duoc:
+        await q.answer("Bạn không có quyền dùng bảng này.", show_alert=True)
+        return
+
+    data = (q.data or "")[2:]  # bỏ tiền tố "p:"
+    thong_bao = "Xong"
+
+    if data.startswith("pause:"):
+        phut = int(data.split(":")[1])
+        await control.pause(db, phut)
+        thong_bao = f"Đã tạm ngưng {phut} phút"
+    elif data == "resume":
+        await control.resume(db)
+        thong_bao = "Đã bật lại"
+    elif data.startswith("act:"):
+        che_do = data.split(":")[1]
+        await control.set_action(db, che_do)
+        thong_bao = "Chuyển sang chế độ thử" if che_do == "report" else "Đã bật ban lại"
+    elif data == "last":
+        await q.answer()
+        try:
+            await q.message.reply_html(await _bans_text(context))
+        except TelegramError:
+            pass
+        return
+    elif data == "undo":
+        ket_qua = await _undo_last(context)
+        await q.answer("Đã gỡ" if "Đã gỡ" in ket_qua else "Không gỡ được", show_alert=False)
+        try:
+            await q.message.reply_html(ket_qua)
+        except TelegramError:
+            pass
+        return
+
+    await q.answer(thong_bao)
+    # Vẽ lại bảng cho khớp trạng thái mới.
+    dang_ngung, _ = await control.is_paused(db)
+    hien_tai = await control.effective_action(db, cfg)
+    try:
+        await q.edit_message_text(
+            await _panel_text(context),
+            parse_mode="HTML",
+            reply_markup=_panel_keyboard(dang_ngung, hien_tai),
+        )
+    except TelegramError:
+        pass  # nội dung không đổi thì Telegram báo lỗi, bỏ qua
+
+
 async def cmd_setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/setgroup — quản lý danh sách nhóm (chỉ owner, trong chat riêng).
 
@@ -2075,6 +2433,9 @@ _OWNER_CMDS = [
 ]
 
 _GROUP_ADMIN_CMDS = [
+    BotCommand("panel", "Bảng điều khiển (bấm nút)"),
+    BotCommand("lastbans", "Xem các lượt ban gần đây"),
+    BotCommand("undo", "Gỡ lượt ban vừa rồi"),
     BotCommand("status", "Trạng thái và thống kê"),
     BotCommand("preset", "Nạp bộ từ cấm dựng sẵn"),
     BotCommand("addblacklist", "Cấm từ ở nhóm này"),
@@ -2119,16 +2480,18 @@ async def _clear_admin_menu(bot, user_id: int) -> None:
         pass
 
 
-async def _check_log_chat(app: Application) -> None:
+async def _check_log_chat(app: Application) -> bool:
     """Kiểm tra LOG_CHAT_ID ngay lúc khởi động, báo rõ nếu không dùng được.
 
     Không kiểm tra thì lỗi chỉ lộ ra khi có vi phạm đầu tiên - lúc đó log
     đã mất và người dùng không biết vì sao.
+
+    Trả về True nếu gửi log được. Lúc chạy tốt thì im lặng để dòng tóm tắt ở
+    _post_init lo phần hiển thị; chỉ nói nhiều khi có trục trặc.
     """
     cfg: Config = app.bot_data["cfg"]
     if not cfg.log_chat_id:
-        log.info("LOG_CHAT_ID: chưa đặt — chỉ ghi log ra màn hình.")
-        return
+        return False
 
     cid = cfg.log_chat_id
     try:
@@ -2145,25 +2508,25 @@ async def _check_log_chat(app: Application) -> None:
             )
         else:
             log.error("LOG_CHAT_ID=%s: không truy cập được — %s", cid, exc)
-        return
+        return False
 
     # Truy cập được rồi, nhưng còn phải gửi được.
     try:
         me = await app.bot.get_chat_member(cid, app.bot.id)
         if me.status == ChatMemberStatus.LEFT:
             log.error("LOG_CHAT_ID=%s (%r): bot đã rời khỏi đây, thêm lại đi.", cid, chat.title)
-            return
+            return False
         if chat.type == ChatType.CHANNEL and me.status != ChatMemberStatus.ADMINISTRATOR:
             log.error(
                 "LOG_CHAT_ID=%s (%r): bot chưa là admin của kênh nên không đăng bài được. "
                 "Cấp quyền admin kèm 'Post Messages'.",
                 cid, chat.title,
             )
-            return
+            return False
     except TelegramError as exc:
         log.warning("LOG_CHAT_ID=%s: không kiểm tra được quyền — %s", cid, exc)
 
-    log.info("LOG_CHAT_ID=%s (%r): ✅ gửi log được.", cid, chat.title or chat.type)
+    return True
 
 
 async def _setup_commands(app: Application) -> None:
@@ -2191,51 +2554,71 @@ async def _setup_commands(app: Application) -> None:
 
 
 async def _post_init(app: Application) -> None:
-    cfg: Config = app.bot_data["cfg"]
-    me = await app.bot.get_me()
-    log.info("Bot @%s đã sẵn sàng (chế độ: %s)", me.username, cfg.action)
-    await _setup_commands(app)
-    await _check_log_chat(app)
+    """Tóm tắt tình trạng lúc khởi động - mỗi thứ đúng một dòng.
 
-    # Privacy mode bật thì bot không đọc được tin nhắn thường -> không lọc được gì.
-    if not getattr(me, "can_read_all_group_messages", False):
+    Chạy tốt thì im lặng và gọn; chỉ khi có trục trặc mới in kèm hướng dẫn sửa,
+    vì lúc đó người đọc mới thực sự cần chi tiết.
+    """
+    cfg: Config = app.bot_data["cfg"]
+    db: Storage = app.bot_data["db"]
+    me = await app.bot.get_me()
+
+    await _setup_commands(app)
+    log_ok = await _check_log_chat(app)
+
+    log.info("Bot: @%s : on  (%s)", me.username, cfg.action)
+
+    # --- Services -----------------------------------------------------------
+    doc_tin = bool(getattr(me, "can_read_all_group_messages", False))
+    dich_vu: list[tuple[str, bool]] = [
+        ("đọc tin nhắn", doc_tin),
+        ("QR", bool(cfg.scan_qr and qrscan.AVAILABLE)),
+        ("OCR", bool(cfg.scan_ocr and ocr.AVAILABLE)),
+        ("xoá tin dịch vụ", bool(cfg.delete_service)),
+    ]
+    if all(ok for _, ok in dich_vu):
+        log.info("Services: all ✓")
+    else:
+        log.info("Services: %s", " · ".join(f"{ten} {'✓' if ok else '✗'}" for ten, ok in dich_vu))
+
+    # --- Logs ---------------------------------------------------------------
+    if log_ok:
+        log.info("Logs: OK ✓")
+    elif not cfg.log_chat_id:
+        log.info("Logs: ✗ chưa đặt LOG_CHAT_ID — chỉ ghi ra màn hình")
+    else:
+        log.info("Logs: ✗ xem lỗi ở trên")
+
+    # --- Nhóm đang quản lý ---------------------------------------------------
+    raw = await db.get_setting("home_group")
+    ids = [p.strip() for p in (raw or "").split(",") if p.strip()]
+    if not ids:
+        log.info("Nhóm: chưa đăng ký nhóm nào — dùng /setgroup")
+    for gid in ids:
+        try:
+            chat = await app.bot.get_chat(int(gid))
+            log.info("%s ✓", chat.title or gid)
+        except (TelegramError, ValueError) as exc:
+            log.warning("%s ✗ %s", gid, exc)
+
+    # Chỉ cái này mới đáng phá vỡ sự gọn gàng: bot mù thì mọi thứ khác vô nghĩa.
+    if not doc_tin:
         log.error(
             "PRIVACY MODE ĐANG BẬT: bot không đọc được tin nhắn thường trong nhóm nên "
             "KHÔNG lọc được spam. Vào @BotFather -> /setprivacy -> chọn bot -> Disable, "
             "rồi kick bot ra khỏi nhóm và thêm lại thì mới có hiệu lực."
         )
-    else:
-        log.info("Privacy mode: đã tắt (bot đọc được tin nhắn trong nhóm)")
-
-    if cfg.delete_service:
-        log.info("Tự xoá tin dịch vụ: %s", ", ".join(sorted(cfg.delete_service)))
-    else:
-        log.info("Tự xoá tin dịch vụ: TẮT")
-
-    if cfg.scan_qr and qrscan.AVAILABLE:
-        log.info("Quét mã QR trong ảnh: BẬT")
-    elif cfg.scan_qr:
+    if cfg.scan_qr and not qrscan.AVAILABLE:
         log.warning(
-            "Quét mã QR: TẮT - không nạp được OpenCV (%s). "
-            "Cài bằng: pip install opencv-python-headless. "
-            "Ảnh chứa QR sẽ không bị kiểm tra.",
+            "QR ✗ — không nạp được OpenCV (%s). Cài: pip install opencv-python-headless",
             qrscan.UNAVAILABLE_REASON or "không rõ nguyên nhân",
         )
-    else:
-        log.info("Quét mã QR trong ảnh: TẮT theo cấu hình")
-
-    if cfg.scan_ocr and ocr.AVAILABLE:
-        log.info("Đọc chữ trong ảnh (OCR): BẬT — ngôn ngữ %s, thu về %dpx",
-                 cfg.ocr_lang, cfg.ocr_max_side)
-    elif cfg.scan_ocr:
+    if cfg.scan_ocr and not ocr.AVAILABLE:
         log.warning(
-            "OCR: TẮT - không dùng được Tesseract (%s). "
-            "Cài: apt install tesseract-ocr tesseract-ocr-vie && pip install pytesseract. "
-            "Chữ nằm trong ảnh sẽ không bị soi từ cấm.",
+            "OCR ✗ — không dùng được Tesseract (%s). "
+            "Cài: apt install tesseract-ocr tesseract-ocr-vie && pip install pytesseract",
             ocr.UNAVAILABLE_REASON or "không rõ nguyên nhân",
         )
-    else:
-        log.info("Đọc chữ trong ảnh (OCR): TẮT theo cấu hình")
 
 
 async def _post_shutdown(app: Application) -> None:
@@ -2293,6 +2676,14 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler("blockuser", cmd_blockuser))
     app.add_handler(CommandHandler("unblockuser", cmd_unblockuser))
     app.add_handler(CommandHandler("blocked", cmd_blocked))
+    # Bang dieu khien + bat/tat
+    app.add_handler(CommandHandler("panel", cmd_panel))
+    app.add_handler(CommandHandler("pause", cmd_pause))
+    app.add_handler(CommandHandler("resume", cmd_resume))
+    app.add_handler(CommandHandler("action", cmd_action))
+    app.add_handler(CommandHandler("lastbans", cmd_lastbans))
+    app.add_handler(CommandHandler("undo", cmd_undo))
+    app.add_handler(CallbackQueryHandler(on_panel_button, pattern=r"^p:"))
     app.add_handler(CommandHandler("services", cmd_services))
     app.add_handler(CommandHandler("anon", cmd_anon))
     app.add_handler(CommandHandler("setgroup", cmd_setgroup))
