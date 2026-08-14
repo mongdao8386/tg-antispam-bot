@@ -30,6 +30,7 @@ from telegram import (
 )
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import BadRequest, Conflict, Forbidden, NetworkError, TelegramError
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     AIORateLimiter,
     Application,
@@ -2793,17 +2794,42 @@ async def _post_shutdown(app: Application) -> None:
         db.close()
 
 
+def _make_request(cfg: Config, polling: bool = False) -> HTTPXRequest:
+    """Tạo tầng HTTP nói chuyện với Telegram.
+
+    Hai chỉnh quan trọng cho mạng Việt Nam:
+
+    * force_ipv4 — nhiều ISP trong nước có IPv6 nhưng KHÔNG định tuyến được
+      tới Telegram. Máy phân giải ra địa chỉ IPv6 rồi ngồi chờ hết timeout mới
+      chịu thử IPv4, làm bot treo hoặc chết lúc khởi động. Buộc gắn socket vào
+      địa chỉ IPv4 nội bộ thì hệ thống chỉ chọn đích IPv4.
+    * thời gian chờ rộng — đo thực tế trên mạng Viettel: bắt tay TCP tới
+      Telegram có lúc mất hơn 7 giây, trong khi bình thường chỉ 0,2 giây.
+    """
+    kwargs: dict = {}
+    if cfg.force_ipv4:
+        import httpx
+
+        kwargs["transport"] = httpx.AsyncHTTPTransport(
+            local_address="0.0.0.0", retries=2
+        )
+    return HTTPXRequest(
+        connect_timeout=cfg.connect_timeout,
+        read_timeout=(cfg.read_timeout + 30) if polling else cfg.read_timeout,
+        write_timeout=cfg.read_timeout,
+        pool_timeout=cfg.connect_timeout,
+        proxy=cfg.proxy_url or None,
+        httpx_kwargs=kwargs or None,
+    )
+
+
 def build_application(cfg: Config) -> Application:
     app = (
         ApplicationBuilder()
         .token(cfg.token)
         .rate_limiter(AIORateLimiter())
-        # Mặc định của thư viện là 5 giây, hơi ngắn khi máy chủ ở xa Telegram
-        # (droplet Singapore) hoặc mạng nhà chập chờn -> hay dính "Timed out".
-        .connect_timeout(10.0)
-        .read_timeout(15.0)
-        .write_timeout(15.0)
-        .pool_timeout(10.0)
+        .request(_make_request(cfg))
+        .get_updates_request(_make_request(cfg, polling=True))
         .post_init(_post_init)
         .post_shutdown(_post_shutdown)
         .build()

@@ -146,6 +146,13 @@ class Config:
     allowed_usernames: set[str] = field(default_factory=set)
     allowed_phones: set[str] = field(default_factory=set)
 
+    # Mạng tới Telegram ở VN hay chập chờn nên để rộng tay.
+    connect_timeout: float = 30.0
+    read_timeout: float = 30.0
+    bootstrap_retries: int = 5
+    proxy_url: str = ""
+    force_ipv4: bool = True
+
     web_enabled: bool = False
     web_host: str = "127.0.0.1"
     web_port: int = 8080
@@ -212,6 +219,11 @@ class Config:
             ),
             allowed_usernames=_username_list("ALLOWED_USERNAMES"),
             allowed_phones=_phone_list("ALLOWED_PHONES"),
+            connect_timeout=float(_int("CONNECT_TIMEOUT", 30)),
+            read_timeout=float(_int("READ_TIMEOUT", 30)),
+            bootstrap_retries=_int("BOOTSTRAP_RETRIES", 5),
+            proxy_url=(os.getenv("PROXY_URL") or "").strip(),
+            force_ipv4=_bool("FORCE_IPV4", True),
             web_enabled=_bool("WEB_ENABLED", False),
             web_host=(os.getenv("WEB_HOST") or "127.0.0.1").strip(),
             web_port=_int("WEB_PORT", 8080),

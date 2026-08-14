@@ -127,6 +127,21 @@ CRYPTO_RE = re.compile(
 
 BANK_RE = re.compile(r"(?i)\b(?:stk|so tk|s[oố] t[aà]i kho[aả]n|acc?t\.?\s*no)\b\D{0,12}\d{6,20}")
 
+# Tên ngân hàng Việt Nam. Ảnh cắt chỉ còn số tài khoản thì không có chữ "STK"
+# nào cả, nhưng gần như luôn có tên hoặc mã ngân hàng bên cạnh dãy số.
+BANK_NAMES = (
+    "vietcombank|vcb|techcombank|tcb|vietinbank|viettinbank|ctg|bidv|agribank"
+    "|mbbank|mb bank|acb|sacombank|vpbank|tpbank|vib|shb|hdbank|ocb|msb|scb"
+    "|seabank|eximbank|lienvietpostbank|lpbank|namabank|pvcombank|bacabank"
+    "|abbank|baovietbank|vietabank|kienlongbank|vietbank|saigonbank|ncb"
+    "|momo|viettel money|zalopay|vnpay"
+)
+# Tên ngân hàng đứng gần một dãy 6-20 chữ số (cách nhau tối đa 40 ký tự).
+BANK_NEAR_RE = re.compile(
+    rf"(?is)\b(?:{BANK_NAMES})\b.{{0,40}}?(?<!\d)\d[\d\s.\-]{{5,25}}\d(?!\d)"
+    rf"|(?<!\d)\d[\d\s.\-]{{5,25}}\d(?!\d).{{0,40}}?\b(?:{BANK_NAMES})\b"
+)
+
 PHONE_RE = re.compile(r"(?<!\d)(?:\+?84|0)(?:3|5|7|8|9)\d(?:[\s.\-]?\d){7}(?!\d)")
 
 EMOJI_RE = re.compile(
@@ -379,10 +394,17 @@ def analyse(facts: MessageFacts, cfg: Config) -> Verdict:
         v.add(2, f"nhắc tới {len(handles)} tài khoản/kênh")
 
     # --- Dấu hiệu tài chính ---
-    if CRYPTO_RE.search(text):
-        v.add(3, "địa chỉ ví crypto")
-    if BANK_RE.search(text):
-        v.add(3, "số tài khoản ngân hàng")
+    # Quét trên `scannable` (gồm cả chữ đọc từ ảnh và nội dung QR), không chỉ
+    # chữ tin nhắn: kẻ spam đã chuyển sang gửi ẢNH CẮT chỉ còn số tài khoản,
+    # không QR không link không chữ, nên chỉ soi text là mù hoàn toàn.
+    if CRYPTO_RE.search(scannable):
+        v.add(v.threshold, "địa chỉ ví crypto")
+    if BANK_RE.search(scannable):
+        v.add(v.threshold, "số tài khoản ngân hàng")
+    elif BANK_NEAR_RE.search(scannable):
+        # Không có chữ "STK" nhưng có tên ngân hàng cạnh một dãy số dài -
+        # đúng kiểu ảnh cắt chỉ để lại thông tin chuyển khoản.
+        v.add(v.threshold, "tên ngân hàng kèm số tài khoản")
     # Số điện thoại: quét cả chữ trong ảnh, vì tờ rơi quảng cáo luôn in số
     # liên hệ lên ảnh chứ không gõ vào tin nhắn.
     phones = {
