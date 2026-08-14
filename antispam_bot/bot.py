@@ -2344,15 +2344,22 @@ async def cmd_web(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    goc = cfg.web_url or f"http://{cfg.web_host}:{cfg.web_port}"
+    # Ưu tiên địa chỉ do Cloudflare Tunnel ghi vào DB. Tunnel kiểu nhanh đổi
+    # địa chỉ mỗi lần khởi động lại, nên nó tự cập nhật vào đây thay vì bắt
+    # sửa .env rồi khởi động lại bot.
+    goc = (await _db(context).get_setting("web_url") or "").strip()
+    goc = goc or cfg.web_url or f"http://{cfg.web_host}:{cfg.web_port}"
     lien_ket = f"{goc}/vao/{web.new_ticket()}"
     canh_bao = ""
-    if not cfg.web_url and cfg.web_host == "127.0.0.1":
+    if goc.startswith("https://"):
+        pass  # đã có HTTPS (thường là qua Cloudflare Tunnel) - không cần cảnh báo
+    elif goc.startswith("http://127.") or goc.startswith("http://localhost"):
         canh_bao = (
-            "\n\n⚠️ Bảng chỉ nghe ở <code>127.0.0.1</code> nên điện thoại chưa vào được. "
-            "Xem README phần Cloudflare Tunnel để mở an toàn."
+            "\n\n⚠️ Bảng chỉ nghe ở <code>127.0.0.1</code> nên điện thoại chưa vào được.\n"
+            "Mở an toàn bằng Cloudflare Tunnel:\n"
+            "<code>bash /opt/antispam/app/deploy/cloudflare-tunnel.sh</code>"
         )
-    elif goc.startswith("http://") and not goc.startswith("http://127."):
+    else:
         canh_bao = (
             "\n\n⚠️ Đang dùng <b>http</b> (không mã hoá). Nên đặt sau HTTPS "
             "trước khi dùng qua Internet."
