@@ -10,3 +10,7 @@ opencv-python-headless>=4.9
 #   apt install tesseract-ocr tesseract-ocr-vie
 # Không có thì bot vẫn chạy, chỉ mất khả năng soi chữ in trên ảnh (xem SCAN_OCR).
 pytesseract>=0.3.10
+
+# Bảng điều khiển web (CMS). Không cài thì bot vẫn chạy, chỉ mất trang web.
+fastapi>=0.115
+uvicorn>=0.30

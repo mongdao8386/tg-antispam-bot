@@ -55,6 +55,13 @@ CREATE TABLE IF NOT EXISTS username_whitelist (
     PRIMARY KEY (chat_id, username)
 );
 
+-- Số điện thoại được phép xuất hiện
+CREATE TABLE IF NOT EXISTS phone_whitelist (
+    chat_id INTEGER NOT NULL,
+    phone   TEXT    NOT NULL,
+    PRIMARY KEY (chat_id, phone)
+);
+
 -- Cài đặt chung của bot (key-value)
 CREATE TABLE IF NOT EXISTS bot_settings (
     key   TEXT PRIMARY KEY,
@@ -434,6 +441,55 @@ class Storage:
 
     async def count_usernames(self, chat_id: int) -> int:
         return await self._run(self._count_usernames, chat_id)
+
+    # -- số điện thoại được phép ------------------------------------------
+
+    def _get_phones(self, chat_id: int) -> set[str]:
+        cur = self._conn.execute(
+            "SELECT phone FROM phone_whitelist WHERE chat_id IN (?, ?)", (chat_id, GLOBAL)
+        )
+        return {r[0] for r in cur.fetchall()}
+
+    async def get_phones(self, chat_id: int) -> set[str]:
+        return await self._run(self._get_phones, chat_id)
+
+    def _get_phones_own(self, chat_id: int) -> set[str]:
+        cur = self._conn.execute(
+            "SELECT phone FROM phone_whitelist WHERE chat_id=?", (chat_id,)
+        )
+        return {r[0] for r in cur.fetchall()}
+
+    async def get_phones_own(self, chat_id: int) -> set[str]:
+        return await self._run(self._get_phones_own, chat_id)
+
+    def _add_phone(self, chat_id: int, phone: str) -> None:
+        self._conn.execute(
+            "INSERT OR IGNORE INTO phone_whitelist (chat_id, phone) VALUES (?,?)",
+            (chat_id, phone),
+        )
+        self._conn.commit()
+
+    async def add_phone(self, chat_id: int, phone: str) -> None:
+        await self._run(self._add_phone, chat_id, phone)
+
+    def _remove_phone(self, chat_id: int, phone: str) -> int:
+        cur = self._conn.execute(
+            "DELETE FROM phone_whitelist WHERE chat_id=? AND phone=?", (chat_id, phone)
+        )
+        self._conn.commit()
+        return cur.rowcount
+
+    async def remove_phone(self, chat_id: int, phone: str) -> int:
+        return await self._run(self._remove_phone, chat_id, phone)
+
+    def _count_phones(self, chat_id: int) -> int:
+        cur = self._conn.execute(
+            "SELECT COUNT(*) FROM phone_whitelist WHERE chat_id=?", (chat_id,)
+        )
+        return int(cur.fetchone()[0])
+
+    async def count_phones(self, chat_id: int) -> int:
+        return await self._run(self._count_phones, chat_id)
 
     # -- cài đặt bot (key-value) ------------------------------------------
 

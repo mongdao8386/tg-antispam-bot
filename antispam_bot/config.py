@@ -81,6 +81,18 @@ def _username_list(name: str) -> set[str]:
     return out
 
 
+def _phone_list(name: str) -> set[str]:
+    """Số điện thoại được phép. Bỏ hết khoảng trắng, dấu chấm, gạch."""
+    import re as _re
+    raw = os.getenv(name, "")
+    out: set[str] = set()
+    for part in raw.replace(";", ",").split(","):
+        part = _re.sub(r"[\s.\-()]", "", part.strip())
+        if part:
+            out.add(part)
+    return out
+
+
 def _domain_list(name: str, default: str) -> set[str]:
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
@@ -113,6 +125,7 @@ class Config:
     block_links_new_only: bool = False
     block_channel_senders: bool = True
     block_mentions: bool = True
+    block_phones: bool = True
 
     # Phanh tự động: ban quá nhiều trong thời gian ngắn thường là dấu hiệu một
     # luật mới đang bắt oan hàng loạt, chứ không phải bị tấn công thật.
@@ -131,6 +144,13 @@ class Config:
 
     whitelist_domains: set[str] = field(default_factory=set)
     allowed_usernames: set[str] = field(default_factory=set)
+    allowed_phones: set[str] = field(default_factory=set)
+
+    web_enabled: bool = False
+    web_host: str = "127.0.0.1"
+    web_port: int = 8080
+    web_url: str = ""
+    web_session_hours: int = 12
 
     db_path: Path = Path("antispam.db")
     log_level: str = "INFO"
@@ -176,6 +196,7 @@ class Config:
             block_links_new_only=_bool("BLOCK_LINKS_NEW_ONLY", False),
             block_channel_senders=_bool("BLOCK_CHANNEL_SENDERS", True),
             block_mentions=_bool("BLOCK_MENTIONS", True),
+            block_phones=_bool("BLOCK_PHONES", True),
             brake_limit=_int("BRAKE_LIMIT", 5),
             brake_window=_int("BRAKE_WINDOW", 60),
             scan_qr=_bool("SCAN_QR", True),
@@ -190,6 +211,12 @@ class Config:
                 "t.me,telegram.org,youtube.com,youtu.be,github.com,google.com,wikipedia.org",
             ),
             allowed_usernames=_username_list("ALLOWED_USERNAMES"),
+            allowed_phones=_phone_list("ALLOWED_PHONES"),
+            web_enabled=_bool("WEB_ENABLED", False),
+            web_host=(os.getenv("WEB_HOST") or "127.0.0.1").strip(),
+            web_port=_int("WEB_PORT", 8080),
+            web_url=(os.getenv("WEB_URL") or "").strip().rstrip("/"),
+            web_session_hours=_int("WEB_SESSION_HOURS", 12),
             db_path=Path((os.getenv("DB_PATH") or "antispam.db").strip()),
             log_level=(os.getenv("LOG_LEVEL") or "INFO").strip().upper(),
         )

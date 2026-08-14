@@ -42,7 +42,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import control, ocr, presets, qrscan
+from . import control, ocr, presets, qrscan, web
 from .config import VALID_ACTIONS, Config
 from .detector import MessageFacts, Verdict, analyse
 from .normalize import looks_like_question, normalize, squeeze
@@ -161,6 +161,7 @@ async def _chat_rules(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> ChatR
         **cfg.__dict__,
         "whitelist_domains": cfg.whitelist_domains | await db.get_whitelist(chat_id),
         "allowed_usernames": cfg.allowed_usernames | ats,
+        "allowed_phones": cfg.allowed_phones | await db.get_phones(chat_id),
     })
     rules = ChatRules(
         cfg=eff,
@@ -2243,6 +2244,127 @@ async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         pass  # nội dung không đổi thì Telegram báo lỗi, bỏ qua
 
 
+def _clean_phone(raw: str) -> str:
+    return re.sub(r"[\s.\-()]", "", raw.strip())
+
+
+async def cmd_addphone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/addphone <số> — cho phép số điện thoại này xuất hiện."""
+    if not await _require_admin(update, context):
+        return
+    scope = _write_scope(update)
+    raws = " ".join(context.args or []).replace(",", " ").split()
+    so = [s for s in (_clean_phone(r) for r in raws) if s]
+    if not so:
+        await _quiet_reply(
+            update, context,
+            "Dùng: <code>/addphone 0912345678</code>\n"
+            "Nhiều số: <code>/addphone 0912345678, 0987654321</code>\n\n"
+            "Mọi số KHÔNG có trong danh sách sẽ bị chặn.",
+        )
+        return
+    db = _db(context)
+    for s in so:
+        await db.add_phone(scope, s)
+    listed = ", ".join(f"<code>{html.escape(s)}</code>" for s in so)
+    await _quiet_reply(update, context, f"✅ Cho phép {listed} ở {_scope_label(scope)}.")
+
+
+async def cmd_delphone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/delphone <số> — bỏ số khỏi danh sách được phép."""
+    if not await _require_admin(update, context):
+        return
+    scope = _write_scope(update)
+    raws = " ".join(context.args or []).replace(",", " ").split()
+    so = [s for s in (_clean_phone(r) for r in raws) if s]
+    if not so:
+        await _quiet_reply(update, context, "Dùng: <code>/delphone 0912345678</code>")
+        return
+    db = _db(context)
+    bo = [s for s in so if await db.remove_phone(scope, s)]
+    await _quiet_reply(
+        update, context,
+        f"Đã bỏ {', '.join(f'<code>{s}</code>' for s in bo)}." if bo
+        else f"Không có số nào trong {_scope_label(scope)}.",
+    )
+
+
+async def cmd_phones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/phones — danh sách số điện thoại được phép."""
+    if not await _require_admin(update, context):
+        return
+    db = _db(context)
+    msg = update.effective_message
+    chung = await db.get_phones_own(GLOBAL)
+    khoi = f"<b>Cho phép ở mọi nhóm</b> ({len(chung)}):\n" + (
+        "\n".join(f"• <code>{s}</code>" for s in sorted(chung)) or "  (trống)"
+    )
+    if msg.chat.type != ChatType.PRIVATE:
+        rieng = await db.get_phones_own(msg.chat_id)
+        khoi += f"\n\n<b>Riêng nhóm này</b> ({len(rieng)}):\n" + (
+            "\n".join(f"• <code>{s}</code>" for s in sorted(rieng)) or "  (trống)"
+        )
+    cfg_so = ", ".join(f"<code>{s}</code>" for s in sorted(_cfg(context).allowed_phones))
+    khoi += f"\n\n<b>Từ file cấu hình</b>: {cfg_so or '(trống)'}"
+    khoi += (
+        f"\n\nChặn số lạ: <code>{_cfg(context).block_phones}</code> "
+        "(đổi bằng BLOCK_PHONES trong .env)"
+    )
+    await _quiet_reply(update, context, khoi)
+
+
+async def cmd_web(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/web — cấp liên kết đăng nhập bảng điều khiển web (dùng một lần)."""
+    # Chỉ owner: bảng web sửa được mọi thứ nên không mở cho admin nhóm.
+    if not _require_owner(update, context):
+        try:
+            await update.effective_message.delete()
+        except TelegramError:
+            pass
+        return
+    msg = update.effective_message
+    if msg.chat.type != ChatType.PRIVATE:
+        await _quiet_reply(update, context, "Nhắn riêng cho bot rồi gõ /web — link này không nên để lộ trong nhóm.")
+        return
+
+    cfg = _cfg(context)
+    if not cfg.web_enabled:
+        await _quiet_reply(
+            update, context,
+            "Bảng web đang tắt. Bật bằng cách đặt <code>WEB_ENABLED=true</code> "
+            "trong .env rồi khởi động lại bot.",
+        )
+        return
+    if not web.AVAILABLE:
+        await _quiet_reply(
+            update, context,
+            f"Thiếu thư viện web: <code>{html.escape(web.UNAVAILABLE_REASON)}</code>\n"
+            "Cài: <code>pip install fastapi uvicorn</code>",
+        )
+        return
+
+    goc = cfg.web_url or f"http://{cfg.web_host}:{cfg.web_port}"
+    lien_ket = f"{goc}/vao/{web.new_ticket()}"
+    canh_bao = ""
+    if not cfg.web_url and cfg.web_host == "127.0.0.1":
+        canh_bao = (
+            "\n\n⚠️ Bảng chỉ nghe ở <code>127.0.0.1</code> nên điện thoại chưa vào được. "
+            "Xem README phần Cloudflare Tunnel để mở an toàn."
+        )
+    elif goc.startswith("http://") and not goc.startswith("http://127."):
+        canh_bao = (
+            "\n\n⚠️ Đang dùng <b>http</b> (không mã hoá). Nên đặt sau HTTPS "
+            "trước khi dùng qua Internet."
+        )
+    await _quiet_reply(
+        update, context,
+        f"🔗 <a href=\"{html.escape(lien_ket)}\">Mở bảng điều khiển</a>\n\n"
+        f"<code>{html.escape(lien_ket)}</code>\n\n"
+        f"Liên kết dùng <b>một lần</b>, hết hạn sau 5 phút. "
+        f"Đăng nhập rồi thì giữ được {cfg.web_session_hours} giờ.{canh_bao}",
+    )
+
+
 async def cmd_setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/setgroup — quản lý danh sách nhóm (chỉ owner, trong chat riêng).
 
@@ -2428,6 +2550,9 @@ _OWNER_CMDS = [
     BotCommand("addadm", "Thêm bot admin"),
     BotCommand("deladm", "Xoá bot admin"),
     BotCommand("admins", "Danh sách bot admin"),
+    BotCommand("addphone", "Cho phép số điện thoại"),
+    BotCommand("phones", "Danh sách SĐT được phép"),
+    BotCommand("web", "Mở bảng điều khiển web"),
     BotCommand("setgroup", "Quản lý danh sách nhóm"),
     BotCommand("id", "Xem ID Telegram của bạn"),
 ]
@@ -2442,6 +2567,7 @@ _GROUP_ADMIN_CMDS = [
     BotCommand("adduser", "Thêm acc seeding (reply hoặc id)"),
     BotCommand("addlink", "Cho phép domain ở nhóm này"),
     BotCommand("addat", "Cho phép nhắc @username"),
+    BotCommand("addphone", "Cho phép số điện thoại"),
     BotCommand("ats", "Danh sách @ được phép"),
     BotCommand("blockuser", "Chặn cứng (reply hoặc id)"),
     BotCommand("services", "Tự xoá tin vào/rời/ghim nhóm"),
@@ -2454,7 +2580,7 @@ _GROUP_ADMIN_CMDS = [
 
 
 # Lệnh chỉ owner mới dùng được — ẩn khỏi menu của bot admin thường.
-_OWNER_ONLY = {"addadm", "deladm", "setgroup"}
+_OWNER_ONLY = {"addadm", "deladm", "setgroup", "web"}
 
 
 async def _apply_admin_menu(bot, user_id: int, is_owner: bool = False) -> bool:
@@ -2621,7 +2747,47 @@ async def _post_init(app: Application) -> None:
         )
 
 
+async def _start_web(app: Application) -> None:
+    """Chạy bảng web trong cùng event loop với bot."""
+    cfg: Config = app.bot_data["cfg"]
+    if not cfg.web_enabled:
+        return
+    if not web.AVAILABLE:
+        log.warning(
+            "Bảng web: BẬT trong .env nhưng thiếu thư viện (%s). "
+            "Cài: pip install fastapi uvicorn",
+            web.UNAVAILABLE_REASON,
+        )
+        return
+    import uvicorn
+
+    server = uvicorn.Server(uvicorn.Config(
+        web.build_app(app, cfg.web_session_hours),
+        host=cfg.web_host, port=cfg.web_port,
+        log_level="warning", access_log=False,
+    ))
+    app.bot_data["web_server"] = server
+    app.bot_data["web_task"] = asyncio.create_task(server.serve())
+    log.info("Bảng web chạy ở http://%s:%d — gõ /web trong chat riêng để lấy link vào.",
+             cfg.web_host, cfg.web_port)
+    if cfg.web_host not in ("127.0.0.1", "localhost") and not cfg.web_url.startswith("https://"):
+        log.warning(
+            "Bảng web đang mở ra ngoài (%s) mà KHÔNG có HTTPS. Bất kỳ ai đoán "
+            "trúng liên kết đều vào được. Nên đặt sau Cloudflare Tunnel.",
+            cfg.web_host,
+        )
+
+
 async def _post_shutdown(app: Application) -> None:
+    server = app.bot_data.get("web_server")
+    if server is not None:
+        server.should_exit = True
+    task = app.bot_data.get("web_task")
+    if task is not None:
+        try:
+            await asyncio.wait_for(task, timeout=5)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            task.cancel()
     db: Storage | None = app.bot_data.get("db")
     if db:
         db.close()
@@ -2686,6 +2852,10 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CallbackQueryHandler(on_panel_button, pattern=r"^p:"))
     app.add_handler(CommandHandler("services", cmd_services))
     app.add_handler(CommandHandler("anon", cmd_anon))
+    app.add_handler(CommandHandler("addphone", cmd_addphone))
+    app.add_handler(CommandHandler("delphone", cmd_delphone))
+    app.add_handler(CommandHandler("phones", cmd_phones))
+    app.add_handler(CommandHandler("web", cmd_web))
     app.add_handler(CommandHandler("setgroup", cmd_setgroup))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("start", cmd_start))

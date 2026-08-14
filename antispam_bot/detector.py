@@ -383,8 +383,17 @@ def analyse(facts: MessageFacts, cfg: Config) -> Verdict:
         v.add(3, "địa chỉ ví crypto")
     if BANK_RE.search(text):
         v.add(3, "số tài khoản ngân hàng")
-    if PHONE_RE.search(text) and (haystack or urls):
-        v.add(2, "số điện thoại liên hệ")
+    # Số điện thoại: quét cả chữ trong ảnh, vì tờ rơi quảng cáo luôn in số
+    # liên hệ lên ảnh chứ không gõ vào tin nhắn.
+    phones = {
+        re.sub(r"[\s.\-]", "", p) for p in PHONE_RE.findall(scannable)
+    }
+    phones = {p for p in phones if p not in cfg.allowed_phones}
+    if phones:
+        if cfg.block_phones:
+            v.add(v.threshold, f"số điện thoại lạ: {', '.join(sorted(phones)[:2])}")
+        elif haystack or urls:
+            v.add(2, "số điện thoại liên hệ")
     if MONEY_RE.search(text):
         v.add(1, "hứa hẹn thu nhập bằng con số")
 
