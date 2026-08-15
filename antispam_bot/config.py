@@ -163,6 +163,10 @@ class Config:
     web_url: str = ""
     web_session_hours: int = 12
 
+    # Khoá bàn phím khi chạy trên máy cá nhân (bỏ trống = không hỏi).
+    start_password: str = ""
+    stop_key: str = "F"
+
     db_path: Path = Path("antispam.db")
     log_level: str = "INFO"
 
@@ -235,6 +239,8 @@ class Config:
             web_port=_int("WEB_PORT", 8080),
             web_url=(os.getenv("WEB_URL") or "").strip().rstrip("/"),
             web_session_hours=_int("WEB_SESSION_HOURS", 12),
+            start_password=(os.getenv("START_PASSWORD") or "").strip(),
+            stop_key=((os.getenv("STOP_KEY") or "F").strip() or "F")[:1].upper(),
             db_path=Path((os.getenv("DB_PATH") or "antispam.db").strip()),
             log_level=(os.getenv("LOG_LEVEL") or "INFO").strip().upper(),
         )

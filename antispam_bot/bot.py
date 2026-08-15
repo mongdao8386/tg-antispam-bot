@@ -2693,25 +2693,39 @@ async def _quet_nhom(app: Application) -> None:
 
     tong = len(nhom)
     co_van_de: list[str] = []
-    for i, gid in enumerate(nhom, 1):
-        try:
-            me = await app.bot.get_chat_member(gid, app.bot.id)
-            if me.status != ChatMemberStatus.ADMINISTRATOR:
-                co_van_de.append(f"{gid}: chưa là admin")
-            elif not getattr(me, "can_delete_messages", False):
-                co_van_de.append(f"{gid}: thiếu quyền xoá tin")
-            elif not getattr(me, "can_restrict_members", False):
-                co_van_de.append(f"{gid}: thiếu quyền cấm thành viên")
-        except Forbidden:
-            co_van_de.append(f"{gid}: bot đã bị kick")
-        except TelegramError:
-            co_van_de.append(f"{gid}: không kiểm tra được (mạng)")
+    xong = 0
 
-        # Thanh tiến trình ghi đè trên cùng một dòng.
-        phan_tram = i * 100 // tong
+    def ve_thanh() -> None:
+        phan_tram = xong * 100 // tong
         day = "█" * (phan_tram // 4) + "░" * (25 - phan_tram // 4)
-        print(f"\r  Kiểm tra nhóm  [{day}] {phan_tram:3d}%  ({i}/{tong})",
+        print(f"\r  Kiểm tra nhóm  [{day}] {phan_tram:3d}%  ({xong}/{tong})",
               end="", flush=True)
+
+    # Hỏi SONG SONG. Trước đây hỏi lần lượt, 25 nhóm trên mạng chậm là ngồi
+    # chờ cả phút mới thấy bot lên. Giới hạn 8 việc cùng lúc để không đụng
+    # giới hạn tốc độ của Telegram.
+    gioi_han = asyncio.Semaphore(8)
+
+    async def kiem_tra(gid: int) -> None:
+        nonlocal xong
+        async with gioi_han:
+            try:
+                me = await app.bot.get_chat_member(gid, app.bot.id)
+                if me.status != ChatMemberStatus.ADMINISTRATOR:
+                    co_van_de.append(f"{gid}: chưa là admin")
+                elif not getattr(me, "can_delete_messages", False):
+                    co_van_de.append(f"{gid}: thiếu quyền xoá tin")
+                elif not getattr(me, "can_restrict_members", False):
+                    co_van_de.append(f"{gid}: thiếu quyền cấm thành viên")
+            except Forbidden:
+                co_van_de.append(f"{gid}: bot đã bị kick")
+            except TelegramError:
+                co_van_de.append(f"{gid}: không kiểm tra được (mạng)")
+            xong += 1
+            ve_thanh()
+
+    ve_thanh()
+    await asyncio.gather(*(kiem_tra(g) for g in nhom))
     print()
 
     if co_van_de:
@@ -2738,18 +2752,21 @@ async def _setup_commands(app: Application) -> None:
     except TelegramError as exc:
         log.warning("Không đặt được menu lệnh: %s", exc)
 
-    # Menu riêng cho owner + bot admin trong chat riêng với bot.
-    for uid in cfg.owner_ids:
-        await _apply_admin_menu(app.bot, uid, is_owner=True)
+    # Menu riêng cho owner + bot admin. Làm song song cho nhanh.
+    await asyncio.gather(*(
+        _apply_admin_menu(app.bot, uid, is_owner=True) for uid in cfg.owner_ids
+    ))
 
     # Bot admin chưa bao giờ bấm Start thì không đặt menu được, và cũng không
     # dùng được bảng điều khiển. Xoá luôn khỏi DB cho danh sách khỏi rác -
     # owner thêm lại bằng /addadm sau khi họ bấm Start là xong.
+    can_dat = [u for u in await db.get_bot_admins() if u not in cfg.owner_ids]
+    ket_qua = await asyncio.gather(*(
+        _apply_admin_menu(app.bot, uid, is_owner=False) for uid in can_dat
+    ))
     bo_di: list[int] = []
-    for uid in await db.get_bot_admins():
-        if uid in cfg.owner_ids:
-            continue
-        if not await _apply_admin_menu(app.bot, uid, is_owner=False):
+    for uid, ok in zip(can_dat, ket_qua):
+        if not ok:
             await db.remove_bot_admin(uid)
             bo_di.append(uid)
     if bo_di:

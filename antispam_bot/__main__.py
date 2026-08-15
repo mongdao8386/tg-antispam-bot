@@ -8,6 +8,7 @@ import sys
 from telegram import Update
 from telegram.error import TimedOut
 
+from . import console
 from .bot import build_application
 from .config import Config
 
@@ -19,7 +20,16 @@ def main() -> None:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
+    if "--dat-mat-khau" in sys.argv:
+        raise SystemExit(console.dat_mat_khau())
+
     cfg = Config.load()
+
+    # Khoá bằng mật khẩu TRƯỚC khi làm bất cứ việc gì khác.
+    if not console.hoi_mat_khau(cfg.start_password):
+        print("  Không mở được bot.")
+        raise SystemExit(1)
+
     logging.basicConfig(
         format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
         level=getattr(logging, cfg.log_level, logging.INFO),
@@ -27,6 +37,14 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
     app = build_application(cfg)
+
+    # Phím tắt tắt bot. Ctrl+C trùng phím copy, bấm nhầm là tắt bot oan.
+    phim = console.PhimTat(cfg.stop_key)
+    if phim.dung_duoc:
+        phim.khi_tat = lambda: app.stop_running()
+        phim.bat_dau()
+        print(f"\n  Bot đang chạy. Bấm Shift+{cfg.stop_key.upper()} để tắt.\n")
+
     try:
         app.run_polling(
             allowed_updates=[
@@ -39,10 +57,26 @@ def main() -> None:
             # Mạng ở VN hay bóp băng thông tới Telegram, bắt tay TCP có khi mất
             # cả chục giây. Thử lại thay vì chết ngay ở lần đầu.
             bootstrap_retries=cfg.bootstrap_retries,
+            # Không cho Ctrl+C dừng bot: nó trùng phím copy. Danh sách rỗng
+            # nghĩa là không bắt tín hiệu nào, KeyboardInterrupt sẽ nổi lên
+            # và được bắt ở dưới.
+            stop_signals=[] if phim.dung_duoc else None,
         )
+    except KeyboardInterrupt:
+        _nhac_phim_tat(cfg)
+        raise SystemExit(1)
     except TimedOut:
         _bao_loi_mang(cfg)
         raise SystemExit(1)
+    finally:
+        phim.dung()
+
+
+def _nhac_phim_tat(cfg: Config) -> None:
+    print(
+        f"\n  (Ctrl+C không tắt bot nữa vì trùng phím copy."
+        f"\n   Dùng Shift+{cfg.stop_key.upper()} để tắt.)\n"
+    )
 
 
 def _bao_loi_mang(cfg: Config) -> None:

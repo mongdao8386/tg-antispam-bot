@@ -1,7 +1,10 @@
 @echo off
 REM ===========================================================
 REM  Bat bot: bam dup vao file nay.
-REM  Tat bot : bam Ctrl+C, hoac dong thang cua so nay.
+REM  Tat bot : bam Shift+F (Ctrl+C khong dung vi trung phim copy).
+REM
+REM  Dat mat khau mo bot:
+REM     .venv\Scripts\python.exe -m antispam_bot --dat-mat-khau
 REM
 REM  Lan chay dau tien se tu tao moi truong rieng (.venv) va cai
 REM  thu vien - mat vai phut. Cac lan sau khoi dong ngay.
@@ -49,7 +52,7 @@ if not exist "%PY%" (
 )
 
 echo.
-echo  Dang khoi dong bot... (Ctrl+C de tat)
+echo  Dang khoi dong bot...
 echo  ---------------------------------------------------------
 echo.
 
