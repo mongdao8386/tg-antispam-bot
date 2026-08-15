@@ -156,6 +156,8 @@ class Config:
     bootstrap_retries: int = 5
     proxy_url: str = ""
     force_ipv4: bool = True
+    # Số tin xử lý song song. 1 = từng tin một như mặc định thư viện.
+    concurrent_updates: int = 16
 
     web_enabled: bool = False
     web_host: str = "127.0.0.1"
@@ -234,6 +236,7 @@ class Config:
             bootstrap_retries=_int("BOOTSTRAP_RETRIES", 5),
             proxy_url=(os.getenv("PROXY_URL") or "").strip(),
             force_ipv4=_bool("FORCE_IPV4", True),
+            concurrent_updates=max(1, _int("CONCURRENT_UPDATES", 16)),
             web_enabled=_bool("WEB_ENABLED", False),
             web_host=(os.getenv("WEB_HOST") or "127.0.0.1").strip(),
             web_port=_int("WEB_PORT", 8080),

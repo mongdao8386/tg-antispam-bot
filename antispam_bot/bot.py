@@ -2542,7 +2542,22 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     if isinstance(err, NetworkError):
-        log.warning("Lỗi mạng, sẽ tự thử lại: %s", err)
+        # Thư viện tự nối lại và không mất tin nhắn nào, nên đây chỉ là tiếng
+        # ồn. Đếm lại rồi báo gộp mỗi 10 phút, thay vì la mỗi lần đứt mạng.
+        bd = context.application.bot_data
+        bd["net_errors"] = bd.get("net_errors", 0) + 1
+        gan_nhat = bd.get("net_report_at", 0.0)
+        bay_gio = time.monotonic()
+        if bay_gio - gan_nhat >= 600:
+            if gan_nhat:  # lần đầu thì im, chỉ báo từ lần tổng kết thứ hai
+                log.info(
+                    "Mạng tới Telegram chập chờn: %d lần đứt trong 10 phút qua "
+                    "(đã tự nối lại, không mất tin nhắn nào).",
+                    bd["net_errors"],
+                )
+            bd["net_report_at"] = bay_gio
+            bd["net_errors"] = 0
+        log.debug("Lỗi mạng: %s", err)
         return
     log.error("Lỗi khi xử lý update", exc_info=err)
 
@@ -2795,7 +2810,7 @@ async def _post_init(app: Application) -> None:
     phim = app.bot_data.get("stop_key")
     print(
         f"\n  ✅ Bot đã chạy và đang canh nhóm."
-        + (f"  Bấm Shift+{phim} để tắt." if phim else "")
+        + (f"  Bấm {phim} để tắt." if phim else "")
         + "\n",
         flush=True,
     )
@@ -2883,6 +2898,13 @@ def build_application(cfg: Config) -> Application:
         .rate_limiter(AIORateLimiter())
         .request(_make_request(cfg))
         .get_updates_request(_make_request(cfg, polling=True))
+        # Mặc định của thư viện là xử lý TỪNG tin một. Nghĩa là một tấm ảnh
+        # tải chậm 30 giây làm đứng luôn mọi nhóm khác trong 30 giây đó.
+        # Cho chạy song song thì ảnh chậm chỉ ảnh hưởng chính nó.
+        # Bot không dùng handler có trạng thái (ConversationHandler) nên xử lý
+        # xen kẽ không gây sai lệch; các thao tác SQLite đều đồng bộ trong một
+        # vòng lặp nên không có chuyện đọc/ghi dở dang.
+        .concurrent_updates(cfg.concurrent_updates)
         .post_init(_post_init)
         .post_shutdown(_post_shutdown)
         .build()

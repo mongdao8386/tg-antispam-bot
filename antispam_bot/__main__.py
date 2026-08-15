@@ -45,7 +45,7 @@ def main() -> None:
         phim.bat_dau()
         # Câu "đã chạy" được in trong _post_init, tức là SAU khi kết nối xong.
         # In ở đây là nói dối: lúc này bot chưa gọi được Telegram lần nào.
-        app.bot_data["stop_key"] = cfg.stop_key.upper()
+        app.bot_data["stop_key"] = phim.mo_ta
 
     print("  Đang kết nối tới Telegram...", flush=True)
 
@@ -77,9 +77,11 @@ def main() -> None:
 
 
 def _nhac_phim_tat(cfg: Config) -> None:
+    # Hỏi lại PhimTat để lấy đúng cách gọi tên: F4 bấm một mình, còn chữ đơn
+    # thì phải kèm Shift.
     print(
         f"\n  (Ctrl+C không tắt bot nữa vì trùng phím copy."
-        f"\n   Dùng Shift+{cfg.stop_key.upper()} để tắt.)\n"
+        f"\n   Dùng {console.PhimTat(cfg.stop_key).mo_ta} để tắt.)\n"
     )
 
 

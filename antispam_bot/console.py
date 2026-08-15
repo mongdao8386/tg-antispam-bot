@@ -170,11 +170,35 @@ class PhimTat:
     systemd vẫn dừng dịch vụ bằng tín hiệu bình thường.
     """
 
+    # Phím chức năng gửi hai byte: một byte dẫn (0x00 hoặc 0xE0) rồi tới mã
+    # quét. Chữ thường chỉ gửi một byte.
+    _MA_PHIM_CHUC_NANG = {
+        "F1": b"\x00\x3b", "F2": b"\x00\x3c", "F3": b"\x00\x3d", "F4": b"\x00\x3e",
+        "F5": b"\x00\x3f", "F6": b"\x00\x40", "F7": b"\x00\x41", "F8": b"\x00\x42",
+        "F9": b"\x00\x43", "F10": b"\x00\x44", "F11": b"\xe0\x85", "F12": b"\xe0\x86",
+    }
+
     def __init__(self, phim: str = "F", khi_tat=None):
-        self.phim = (phim or "F")[:1]
+        raw = (phim or "F").strip().upper()
+        if raw in self._MA_PHIM_CHUC_NANG:
+            # Phím chức năng thật: F4, F8... Bấm một mình, không cần Shift.
+            self.ten = raw
+            self.can_shift = False
+            self._mong_doi = self._MA_PHIM_CHUC_NANG[raw]
+        else:
+            # Một chữ cái: bấm kèm Shift để ra chữ HOA.
+            chu = raw[:1] or "F"
+            self.ten = chu
+            self.can_shift = True
+            self._mong_doi = chu.encode()
         self.khi_tat = khi_tat
         self._chay = False
         self._luong: threading.Thread | None = None
+
+    @property
+    def mo_ta(self) -> str:
+        """Câu hướng dẫn hiện cho người dùng."""
+        return f"Shift+{self.ten}" if self.can_shift else self.ten
 
     @property
     def dung_duoc(self) -> bool:
@@ -202,12 +226,15 @@ class PhimTat:
         import msvcrt
         import time
 
-        mong_doi = self.phim.encode()
         while self._chay:
             if msvcrt.kbhit():
                 phim = msvcrt.getch()
+                # Byte dẫn 0x00 / 0xE0 báo hiệu phím chức năng: phải đọc thêm
+                # byte thứ hai mới biết là phím nào.
+                if phim in (b"\x00", b"\xe0"):
+                    phim += msvcrt.getch()
                 # So khớp đúng chữ HOA: Shift+F ra b"F", còn f thường ra b"f".
-                if phim == mong_doi and self.khi_tat:
+                if phim == self._mong_doi and self.khi_tat:
                     self.khi_tat()
                     return
             time.sleep(0.08)
