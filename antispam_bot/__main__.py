@@ -43,7 +43,11 @@ def main() -> None:
     if phim.dung_duoc:
         phim.khi_tat = lambda: app.stop_running()
         phim.bat_dau()
-        print(f"\n  Bot đang chạy. Bấm Shift+{cfg.stop_key.upper()} để tắt.\n")
+        # Câu "đã chạy" được in trong _post_init, tức là SAU khi kết nối xong.
+        # In ở đây là nói dối: lúc này bot chưa gọi được Telegram lần nào.
+        app.bot_data["stop_key"] = cfg.stop_key.upper()
+
+    print("  Đang kết nối tới Telegram...", flush=True)
 
     try:
         app.run_polling(

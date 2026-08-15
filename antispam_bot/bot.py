@@ -2679,63 +2679,6 @@ async def _check_log_chat(app: Application) -> bool:
     return True
 
 
-async def _quet_nhom(app: Application) -> None:
-    """Kiểm tra quyền ở mọi nhóm, hiện một thanh tiến trình thay vì liệt kê.
-
-    Trước đây mỗi nhóm in một dòng "bot có đủ quyền", chạy 20 nhóm là 20 dòng
-    rác. Giờ chỉ một thanh chạy, và CHỈ in ra nhóm nào có vấn đề.
-    """
-    db: Storage = app.bot_data["db"]
-    raw = await db.get_setting("home_group") or ""
-    nhom = [int(x) for x in (p.strip() for p in raw.split(",")) if x.lstrip("-").isdigit()]
-    if not nhom:
-        return
-
-    tong = len(nhom)
-    co_van_de: list[str] = []
-    xong = 0
-
-    def ve_thanh() -> None:
-        phan_tram = xong * 100 // tong
-        day = "█" * (phan_tram // 4) + "░" * (25 - phan_tram // 4)
-        print(f"\r  Kiểm tra nhóm  [{day}] {phan_tram:3d}%  ({xong}/{tong})",
-              end="", flush=True)
-
-    # Hỏi SONG SONG. Trước đây hỏi lần lượt, 25 nhóm trên mạng chậm là ngồi
-    # chờ cả phút mới thấy bot lên. Giới hạn 8 việc cùng lúc để không đụng
-    # giới hạn tốc độ của Telegram.
-    gioi_han = asyncio.Semaphore(8)
-
-    async def kiem_tra(gid: int) -> None:
-        nonlocal xong
-        async with gioi_han:
-            try:
-                me = await app.bot.get_chat_member(gid, app.bot.id)
-                if me.status != ChatMemberStatus.ADMINISTRATOR:
-                    co_van_de.append(f"{gid}: chưa là admin")
-                elif not getattr(me, "can_delete_messages", False):
-                    co_van_de.append(f"{gid}: thiếu quyền xoá tin")
-                elif not getattr(me, "can_restrict_members", False):
-                    co_van_de.append(f"{gid}: thiếu quyền cấm thành viên")
-            except Forbidden:
-                co_van_de.append(f"{gid}: bot đã bị kick")
-            except TelegramError:
-                co_van_de.append(f"{gid}: không kiểm tra được (mạng)")
-            xong += 1
-            ve_thanh()
-
-    ve_thanh()
-    await asyncio.gather(*(kiem_tra(g) for g in nhom))
-    print()
-
-    if co_van_de:
-        log.warning("Có %d nhóm cần xử lý:", len(co_van_de))
-        for d in co_van_de:
-            log.warning("   • %s", d)
-    else:
-        log.info("Toàn bộ %d nhóm: đủ quyền ✓", tong)
-
-
 async def _setup_commands(app: Application) -> None:
     """Menu lệnh theo từng đối tượng.
 
@@ -2843,6 +2786,19 @@ async def _post_init(app: Application) -> None:
             "Cài: apt install tesseract-ocr tesseract-ocr-vie && pip install pytesseract",
             ocr.UNAVAILABLE_REASON or "không rõ nguyên nhân",
         )
+
+    await _start_web(app)
+
+    # Câu cuối cùng, in SAU khi mọi thứ đã sẵn sàng. Trước đây câu này in
+    # trước lúc kết nối nên không nói lên điều gì - bot có thể vẫn đang loay
+    # hoay gọi Telegram mà người dùng tưởng đã chạy.
+    phim = app.bot_data.get("stop_key")
+    print(
+        f"\n  ✅ Bot đã chạy và đang canh nhóm."
+        + (f"  Bấm Shift+{phim} để tắt." if phim else "")
+        + "\n",
+        flush=True,
+    )
 
 
 async def _start_web(app: Application) -> None:
