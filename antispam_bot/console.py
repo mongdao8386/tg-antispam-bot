@@ -36,13 +36,22 @@ def tao_chuoi_luu(mat_khau: str) -> str:
     return f"pbkdf2${muoi}${bam(mat_khau, muoi)}"
 
 
+def la_chuoi_bam(chuoi_luu: str) -> bool:
+    return chuoi_luu.startswith("pbkdf2$") and chuoi_luu.count("$") == 2
+
+
 def kiem_tra(mat_khau: str, chuoi_luu: str) -> bool:
-    try:
-        kieu, muoi, dung = chuoi_luu.split("$", 2)
-    except ValueError:
-        return False
-    if kieu != "pbkdf2":
-        return False
+    """So mật khẩu với giá trị lưu trong .env.
+
+    Chấp nhận cả hai dạng:
+      * pbkdf2$muối$băm — dạng chuẩn do --dat-mat-khau tạo ra
+      * chữ thường      — khi người dùng sửa tay .env. Vẫn cho vào, nhưng nơi
+        gọi sẽ tự nâng cấp lên dạng băm. Không chấp nhận thì người sửa tay bị
+        khoá ngoài mà không hiểu vì sao.
+    """
+    if not la_chuoi_bam(chuoi_luu):
+        return hmac.compare_digest(mat_khau, chuoi_luu)
+    kieu, muoi, dung = chuoi_luu.split("$", 2)
     # compare_digest: so sánh trong thời gian cố định, tránh lộ thông tin qua
     # thời gian phản hồi.
     return hmac.compare_digest(bam(mat_khau, muoi), dung)
@@ -57,6 +66,13 @@ def hoi_mat_khau(chuoi_luu: str, so_lan: int = 3) -> bool:
     if not sys.stdin or not sys.stdin.isatty():
         return True
 
+    if not la_chuoi_bam(chuoi_luu):
+        print(
+            "  Lưu ý: START_PASSWORD trong .env đang là chữ thường (ai mở file "
+            "cũng đọc được).\n"
+            "  Nhập đúng một lần là bot tự thay bằng chuỗi băm."
+        )
+
     for lan in range(so_lan):
         try:
             nhap = getpass.getpass("  Mật khẩu: ")
@@ -64,10 +80,50 @@ def hoi_mat_khau(chuoi_luu: str, so_lan: int = 3) -> bool:
             print()
             return False
         if kiem_tra(nhap, chuoi_luu):
+            # Đang lưu chữ thường thì nâng cấp ngay, khỏi phải nhớ chạy lệnh.
+            if not la_chuoi_bam(chuoi_luu):
+                if _ghi_env(tao_chuoi_luu(nhap)):
+                    print("  Đã băm mật khẩu và cập nhật .env.")
             return True
         con = so_lan - lan - 1
         print(f"  Sai mật khẩu.{f' Còn {con} lần thử.' if con else ''}")
+
+    if not la_chuoi_bam(chuoi_luu):
+        print(
+            "\n  Quên mật khẩu? Mở file .env, xoá phần sau dấu = ở dòng\n"
+            "  START_PASSWORD rồi lưu lại — bot sẽ không hỏi nữa."
+        )
+    else:
+        print(
+            "\n  Quên mật khẩu? Chạy:\n"
+            "     .venv\\Scripts\\python.exe -m antispam_bot --dat-mat-khau"
+        )
     return False
+
+
+def _ghi_env(gia_tri: str, duong_dan_env: str = ".env") -> bool:
+    """Ghi START_PASSWORD vào .env. Trả về True nếu ghi được."""
+    try:
+        with open(duong_dan_env, encoding="utf-8") as f:
+            dong = f.read().splitlines()
+    except OSError:
+        return False
+
+    thay = False
+    for i, d in enumerate(dong):
+        if d.startswith("START_PASSWORD="):
+            dong[i] = f"START_PASSWORD={gia_tri}"
+            thay = True
+            break
+    if not thay:
+        dong += ["", f"START_PASSWORD={gia_tri}"]
+
+    try:
+        with open(duong_dan_env, "w", encoding="utf-8") as f:
+            f.write("\n".join(dong) + "\n")
+        return True
+    except OSError:
+        return False
 
 
 def dat_mat_khau(duong_dan_env: str = ".env") -> int:
@@ -89,25 +145,9 @@ def dat_mat_khau(duong_dan_env: str = ".env") -> int:
     else:
         gia_tri = ""
 
-    dong_moi = f"START_PASSWORD={gia_tri}"
-    try:
-        with open(duong_dan_env, encoding="utf-8") as f:
-            dong = f.read().splitlines()
-    except FileNotFoundError:
-        dong = []
-
-    thay = False
-    for i, d in enumerate(dong):
-        if d.startswith("START_PASSWORD="):
-            dong[i] = dong_moi
-            thay = True
-            break
-    if not thay:
-        dong += ["", "# Mật khẩu mở bot (đã băm). Đổi bằng: python -m antispam_bot --dat-mat-khau",
-                 dong_moi]
-
-    with open(duong_dan_env, "w", encoding="utf-8") as f:
-        f.write("\n".join(dong) + "\n")
+    if not _ghi_env(gia_tri, duong_dan_env):
+        print(f"  Không ghi được vào {duong_dan_env}. Kiểm tra quyền ghi file.")
+        return 1
 
     print(f"  Đã {'đặt' if gia_tri else 'bỏ'} mật khẩu, lưu vào {duong_dan_env}")
     if gia_tri:
