@@ -377,7 +377,8 @@ async def _warn_if_crippled(chat: Chat, context: ContextTypes.DEFAULT_TYPE) -> N
             chat.title or chat.id, chat.id, "; ".join(missing),
         )
     else:
-        log.info("Nhóm %r (%s): bot có đủ quyền.", chat.title or chat.id, chat.id)
+        # Đủ quyền là chuyện bình thường, không cần báo. Chỉ ồn terminal.
+        log.debug("Nhóm %s: đủ quyền.", chat.id)
 
     # Ẩn danh chỉ là tuỳ chọn thẩm mỹ, không ảnh hưởng khả năng chặn spam.
     # Không cảnh báo, chỉ ghi nhận - ai cần thì gõ /anon để xem.
@@ -456,6 +457,7 @@ def _extract_facts(
     fwd_exempt: bool = False,
     ocr_text: str = "",
     is_question: bool = False,
+    sender_name: str = "",
 ) -> MessageFacts:
     text = " ".join(p for p in (msg.text, msg.caption) if p)
 
@@ -504,6 +506,10 @@ def _extract_facts(
         qr_payloads=qr_payloads or [],
         ocr_text=ocr_text,
         is_question=is_question,
+        sender_name=sender_name,
+        # Tới được đây nghĩa là _is_exempt() đã cho qua, tức KHÔNG phải admin
+        # thật (admin thật bị chặn từ vòng ngoài). Nên luôn là False.
+        is_real_admin=False,
     )
 
 
@@ -620,7 +626,9 @@ async def _report(
     uid = user.id if user else (msg.sender_chat.id if msg.sender_chat else 0)
     excerpt = (msg.text or msg.caption or "<không có chữ>")[:300]
 
-    log.info("[%s] %s | %s (%s) | %s", action.upper(), chat.title or chat.id, who, uid, verdict.summary())
+    # Chi ghi o muc debug: terminal khong can liet ke tung nguoi bi ban,
+    # LOG_CHAT_ID va bang offences da luu day du roi.
+    log.debug("[%s] %s | %s (%s) | %s", action.upper(), chat.title or chat.id, who, uid, verdict.summary())
 
     cfg = _cfg(context)
     if not cfg.log_chat_id:
@@ -806,6 +814,10 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     facts = _extract_facts(
         msg, is_new, offences, has_qr, qr_payloads, fwd_exempt=fwd_exempt,
         ocr_text=ocr_text, is_question=benign_question,
+        sender_name=(
+            msg.from_user.full_name if msg.from_user
+            else (msg.sender_chat.title if msg.sender_chat else "")
+        ) or "",
     )
 
     if force_punish:
@@ -832,6 +844,10 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     await _report(context, chat, msg, verdict, action)
 
+    if action == "ban":
+        # Bi ban roi thi khong con la thanh vien - xoa khoi bang members de
+        # khong hien trong danh sach va khong tinh vao thong ke nua.
+        await db.forget_member(chat.id, uid)
     if action in ("ban", "mute"):
         await _check_brake(context)
 
@@ -2602,7 +2618,7 @@ async def _apply_admin_menu(bot, user_id: int, is_owner: bool = False) -> bool:
         await bot.set_my_commands(cmds, scope=BotCommandScopeChat(chat_id=user_id))
         return True
     except TelegramError as exc:
-        log.info("Chưa đặt được menu cho %s (có thể chưa bấm Start): %s", user_id, exc)
+        log.debug("Chưa đặt được menu cho %s: %s", user_id, exc)
         return False
 
 
@@ -2663,6 +2679,49 @@ async def _check_log_chat(app: Application) -> bool:
     return True
 
 
+async def _quet_nhom(app: Application) -> None:
+    """Kiểm tra quyền ở mọi nhóm, hiện một thanh tiến trình thay vì liệt kê.
+
+    Trước đây mỗi nhóm in một dòng "bot có đủ quyền", chạy 20 nhóm là 20 dòng
+    rác. Giờ chỉ một thanh chạy, và CHỈ in ra nhóm nào có vấn đề.
+    """
+    db: Storage = app.bot_data["db"]
+    raw = await db.get_setting("home_group") or ""
+    nhom = [int(x) for x in (p.strip() for p in raw.split(",")) if x.lstrip("-").isdigit()]
+    if not nhom:
+        return
+
+    tong = len(nhom)
+    co_van_de: list[str] = []
+    for i, gid in enumerate(nhom, 1):
+        try:
+            me = await app.bot.get_chat_member(gid, app.bot.id)
+            if me.status != ChatMemberStatus.ADMINISTRATOR:
+                co_van_de.append(f"{gid}: chưa là admin")
+            elif not getattr(me, "can_delete_messages", False):
+                co_van_de.append(f"{gid}: thiếu quyền xoá tin")
+            elif not getattr(me, "can_restrict_members", False):
+                co_van_de.append(f"{gid}: thiếu quyền cấm thành viên")
+        except Forbidden:
+            co_van_de.append(f"{gid}: bot đã bị kick")
+        except TelegramError:
+            co_van_de.append(f"{gid}: không kiểm tra được (mạng)")
+
+        # Thanh tiến trình ghi đè trên cùng một dòng.
+        phan_tram = i * 100 // tong
+        day = "█" * (phan_tram // 4) + "░" * (25 - phan_tram // 4)
+        print(f"\r  Kiểm tra nhóm  [{day}] {phan_tram:3d}%  ({i}/{tong})",
+              end="", flush=True)
+    print()
+
+    if co_van_de:
+        log.warning("Có %d nhóm cần xử lý:", len(co_van_de))
+        for d in co_van_de:
+            log.warning("   • %s", d)
+    else:
+        log.info("Toàn bộ %d nhóm: đủ quyền ✓", tong)
+
+
 async def _setup_commands(app: Application) -> None:
     """Menu lệnh theo từng đối tượng.
 
@@ -2682,9 +2741,23 @@ async def _setup_commands(app: Application) -> None:
     # Menu riêng cho owner + bot admin trong chat riêng với bot.
     for uid in cfg.owner_ids:
         await _apply_admin_menu(app.bot, uid, is_owner=True)
+
+    # Bot admin chưa bao giờ bấm Start thì không đặt menu được, và cũng không
+    # dùng được bảng điều khiển. Xoá luôn khỏi DB cho danh sách khỏi rác -
+    # owner thêm lại bằng /addadm sau khi họ bấm Start là xong.
+    bo_di: list[int] = []
     for uid in await db.get_bot_admins():
-        if uid not in cfg.owner_ids:
-            await _apply_admin_menu(app.bot, uid, is_owner=False)
+        if uid in cfg.owner_ids:
+            continue
+        if not await _apply_admin_menu(app.bot, uid, is_owner=False):
+            await db.remove_bot_admin(uid)
+            bo_di.append(uid)
+    if bo_di:
+        log.info(
+            "Đã bỏ %d bot admin chưa bấm Start với bot: %s. "
+            "Bảo họ mở chat riêng bấm Start rồi /addadm lại.",
+            len(bo_di), ", ".join(str(u) for u in bo_di),
+        )
 
 
 async def _post_init(app: Application) -> None:

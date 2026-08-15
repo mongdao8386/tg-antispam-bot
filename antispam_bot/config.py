@@ -126,6 +126,10 @@ class Config:
     block_channel_senders: bool = True
     block_mentions: bool = True
     block_phones: bool = True
+    # Ảnh bill chuyển khoản từ mức này trở lên thì chặn. 0 = tắt luật.
+    bill_min_amount: int = 108_000
+    # Chặn người đặt tên giả mạo ban quản trị (Trợ lý, QTV, Admin...).
+    block_fake_admin: bool = True
 
     # Phanh tự động: ban quá nhiều trong thời gian ngắn thường là dấu hiệu một
     # luật mới đang bắt oan hàng loạt, chứ không phải bị tấn công thật.
@@ -204,6 +208,8 @@ class Config:
             block_channel_senders=_bool("BLOCK_CHANNEL_SENDERS", True),
             block_mentions=_bool("BLOCK_MENTIONS", True),
             block_phones=_bool("BLOCK_PHONES", True),
+            bill_min_amount=_int("BILL_MIN_AMOUNT", 108_000),
+            block_fake_admin=_bool("BLOCK_FAKE_ADMIN", True),
             brake_limit=_int("BRAKE_LIMIT", 5),
             brake_window=_int("BRAKE_WINDOW", 60),
             scan_qr=_bool("SCAN_QR", True),

@@ -142,7 +142,42 @@ BANK_NEAR_RE = re.compile(
     rf"|(?<!\d)\d[\d\s.\-]{{5,25}}\d(?!\d).{{0,40}}?\b(?:{BANK_NAMES})\b"
 )
 
-PHONE_RE = re.compile(r"(?<!\d)(?:\+?84|0)(?:3|5|7|8|9)\d(?:[\s.\-]?\d){7}(?!\d)")
+# Số điện thoại: bắt cả số trong nước lẫn số quốc tế (+84, +1, +44, +86...).
+# Kẻ spam đổi sang ghi +84 hoặc số nước ngoài để né luật chỉ bắt số bắt đầu
+# bằng 0. Hai nhánh:
+#   1. Số VN viết kiểu nội địa: 0 + đầu số di động + 8 chữ số
+#   2. Bất kỳ số nào có dấu + đứng đầu: mã quốc gia 1-3 số rồi 6-13 chữ số
+PHONE_RE = re.compile(
+    r"(?<![\d+])(?:0(?:3|5|7|8|9)\d(?:[\s.\-]?\d){7})(?!\d)"
+    r"|\+\d{1,3}[\s.\-]?\d(?:[\s.\-]?\d){5,13}(?!\d)"
+)
+
+# Hoá đơn / biên lai chuyển khoản. Ảnh chụp bill là chiêu khoe "đã trả tiền"
+# để dụ nạn nhân tin tưởng.
+BILL_HINT_RE = re.compile(
+    r"(?i)chuy[eể]n\s*kho[aả]n|giao\s*d[iị]ch\s*th[aà]nh\s*c[oô]ng"
+    r"|s[oố]\s*ti[eề]n|bi[eê]n\s*lai|h[oó]a\s*[dđ][oơ]n|thanh\s*to[aá]n"
+    r"|transfer|successful|receipt|s[oố]\s*d[uư]|t[iị]ch\s*l[uũ]y"
+    r"|m[aã]\s*giao\s*d[iị]ch|n[oộ]i\s*dung\s*chuy[eể]n"
+)
+# Số tiền kiểu Việt Nam: 108.000 / 108,000 / 1.500.000đ / 500000 VND
+AMOUNT_RE = re.compile(
+    r"(?<![\d.,])(\d{1,3}(?:[.,]\d{3})+|\d{4,12})\s*(?:vn[dđ]|đ|d\b)?",
+    re.IGNORECASE,
+)
+
+# Tên tự xưng chức vụ. Người thật hiếm khi đặt tên là "Trợ lý" hay "QTV";
+# đây là chiêu giả mạo ban quản trị để lừa thành viên nhắn riêng.
+# So khớp trên chuỗi ĐÃ normalize (bỏ dấu, chữ thường) nên viết ở dạng không
+# dấu - cùng quy ước với bộ từ khoá phía trên. Nhờ vậy bắt được cả "Trợ Lý",
+# "TRO LY", "trợ lý" mà không phải liệt kê từng biến thể.
+FAKE_ADMIN_RE = re.compile(
+    r"(?:^|\s)(?:"
+    r"tro ly|quan ly|quan tri|admin|adm|qtv|ql|tl|hr|ho tro|support|cskh"
+    r"|cham soc khach|ke toan|thu ngan|nhan vien|nv|bot|manager|staff"
+    r"|team support|cong tac vien|ctv|mod|moderator|ban quan tri"
+    r")(?:\s|$)"
+)
 
 EMOJI_RE = re.compile(
     "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF⬀-⯿]"
@@ -194,6 +229,10 @@ class MessageFacts:
     # Tin thuần chữ và đang hỏi ("nhóm này có lừa đảo không?"). bot.py chỉ bật
     # cờ này khi không kèm link/ảnh/@, nên không lách được bằng dấu ?.
     is_question: bool = False
+    # Tên hiển thị của người gửi, để bắt kiểu giả mạo "Trợ lý", "QTV"...
+    sender_name: str = ""
+    # Người này có đúng là admin thật của nhóm không (đã xác minh qua API).
+    is_real_admin: bool = False
 
 
 @dataclass
@@ -418,6 +457,35 @@ def analyse(facts: MessageFacts, cfg: Config) -> Verdict:
             v.add(2, "số điện thoại liên hệ")
     if MONEY_RE.search(text):
         v.add(1, "hứa hẹn thu nhập bằng con số")
+
+    # --- Ảnh bill chuyển khoản ---
+    # Khoe biên lai để tạo lòng tin ("tôi vừa rút được tiền"). Chỉ xét khi có
+    # dấu hiệu biên lai đi kèm, để con số đơn lẻ trong ảnh không bị bắt oan.
+    if cfg.bill_min_amount > 0 and facts.ocr_text and BILL_HINT_RE.search(facts.ocr_text):
+        cao_nhat = 0
+        for m in AMOUNT_RE.finditer(facts.ocr_text):
+            try:
+                so = int(m.group(1).replace(".", "").replace(",", ""))
+            except ValueError:
+                continue
+            # Bỏ số quá lớn: thường là số tài khoản hay mã giao dịch, không
+            # phải số tiền.
+            if so <= 100_000_000_000:
+                cao_nhat = max(cao_nhat, so)
+        if cao_nhat >= cfg.bill_min_amount:
+            v.add(v.threshold, f"ảnh bill chuyển khoản ({cao_nhat:,}đ)".replace(",", "."))
+
+    # --- Giả mạo ban quản trị ---
+    # Đặt tên "Trợ lý", "QTV", "Admin" mà không phải admin thật là chiêu dụ
+    # thành viên nhắn riêng rồi lừa. Admin thật đã được miễn trừ từ trước nên
+    # không bao giờ tới được đây.
+    if cfg.block_fake_admin and not facts.is_real_admin and facts.sender_name:
+        # normalize() bỏ dấu và gộp ký tự lạ về khoảng trắng, nên bắt được cả
+        # "Trợ Lý", "TRO LY", và cả tên trang trí kiểu 𝓣𝓻𝓸̛̣ 𝓛𝔂́.
+        ten_chuan = f" {normalize(facts.sender_name)} "
+        khop = FAKE_ADMIN_RE.search(ten_chuan)
+        if khop:
+            v.add(v.threshold, f"tên giả mạo ban quản trị: {khop.group(0).strip()!r}")
 
     # --- Hình thức ---
     v.add(obfuscation_score(text), "ký tự ẩn / chữ giả Latin")

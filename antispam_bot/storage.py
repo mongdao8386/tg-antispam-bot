@@ -175,6 +175,18 @@ class Storage:
     async def set_trusted(self, chat_id: int, user_id: int, trusted: bool = True) -> None:
         await self._run(self._set_trusted, chat_id, user_id, trusted)
 
+    def _forget_member(self, chat_id: int, user_id: int) -> int:
+        cur = self._conn.execute(
+            "DELETE FROM members WHERE chat_id=? AND user_id=?", (chat_id, user_id)
+        )
+        self._conn.commit()
+        return cur.rowcount
+
+    async def forget_member(self, chat_id: int, user_id: int) -> int:
+        """Xoá khỏi bảng thành viên. Dùng sau khi ban - người đã bị đá ra khỏi
+        nhóm thì không nên còn nằm trong danh sách thành viên nữa."""
+        return await self._run(self._forget_member, chat_id, user_id)
+
     # -- offences ---------------------------------------------------------
 
     def _count_offences(self, chat_id: int, user_id: int) -> int:
