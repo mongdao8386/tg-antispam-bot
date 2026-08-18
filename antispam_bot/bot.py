@@ -221,7 +221,7 @@ async def _drop_group(chat_id: int, context: ContextTypes.DEFAULT_TYPE, ly_do: s
 
 
 async def _managed_groups(context: ContextTypes.DEFAULT_TYPE) -> list[int]:
-    """Danh sách nhóm đã đăng ký bằng /setgroup."""
+    """Danh sách nhóm đã đăng ký bằng /set_group."""
     raw = await _db(context).get_setting("home_group")
     if not raw:
         return []
@@ -731,7 +731,7 @@ async def _check_brake(context: ContextTypes.DEFAULT_TYPE) -> None:
     await control.note_brake(db)
     log.error(
         "PHANH TỰ ĐỘNG: đã xử lý >= %d người trong %d giây. Chuyển sang chế độ "
-        "chỉ ghi log. Kiểm tra /lastbans rồi bật lại bằng /action ban.",
+        "chỉ ghi log. Kiểm tra /last_bans rồi bật lại bằng /action ban.",
         cfg.brake_limit, cfg.brake_window,
     )
     loi_nhan = (
@@ -739,7 +739,7 @@ async def _check_brake(context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Vừa xử lý <b>{cfg.brake_limit}+</b> người trong {cfg.brake_window} giây — "
         "thường là dấu hiệu một luật đang bắt oan hàng loạt.\n\n"
         "Bot chuyển sang <b>chỉ ghi log</b>, không ban nữa.\n\n"
-        "Xem /lastbans để kiểm tra. Đúng thì /action ban để bật lại, "
+        "Xem /last_bans để kiểm tra. Đúng thì /action ban để bật lại, "
         "sai thì /undo để gỡ."
     )
     for oid in cfg.owner_ids:
@@ -1026,7 +1026,7 @@ async def _quiet_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
 
 
 def _require_owner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Chỉ owner (OWNER_IDS) — dùng cho lệnh /addadm, /deladm, /setgroup."""
+    """Chỉ owner (OWNER_IDS) — dùng cho lệnh /add_admin, /delete_admin, /set_group."""
     user = update.effective_user
     return user is not None and user.id in _cfg(context).owner_ids
 
@@ -1040,7 +1040,7 @@ async def _require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Owner luôn được phép.
     if user.id in _cfg(context).owner_ids:
         return True
-    # Bot admin toàn cục (được thêm bởi /addadm).
+    # Bot admin toàn cục (được thêm bởi /add_admin).
     if await _db(context).is_bot_admin(user.id):
         return True
     # Trong chat riêng chỉ owner/bot_admin mới được; những người khác bị chặn im lặng.
@@ -1072,7 +1072,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not targets:
         await _quiet_reply(
             update, context,
-            "Chưa đăng ký nhóm nào.\nDùng: <code>/setgroup -100XXXXXXXXX</code>",
+            "Chưa đăng ký nhóm nào.\nDùng: <code>/set_group -100XXXXXXXXX</code>",
         )
         return
 
@@ -1229,7 +1229,7 @@ async def cmd_trust(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
     targets = await _target_chat_ids(update, context)
     if not targets:
-        await _quiet_reply(update, context, "Chưa đăng ký nhóm nào. Dùng /setgroup")
+        await _quiet_reply(update, context, "Chưa đăng ký nhóm nào. Dùng /set_group")
         return
 
     uid: int | None = None
@@ -1265,7 +1265,7 @@ async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
     targets = await _target_chat_ids(update, context)
     if not targets:
-        await _quiet_reply(update, context, "Chưa đăng ký nhóm nào. Dùng /setgroup")
+        await _quiet_reply(update, context, "Chưa đăng ký nhóm nào. Dùng /set_group")
         return
     uid: int | None = None
     if context.args:
@@ -1292,82 +1292,86 @@ async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _quiet_reply(update, context, f"Đã gỡ chặn <code>{uid}</code> ở {ok} nhóm{tail}.")
 
 
-def _parse_uid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
-    """Lấy user_id từ tham số đầu tiên hoặc từ tin nhắn được reply."""
-    args = context.args or []
-    if args:
-        try:
-            return int(args[0])
-        except ValueError:
-            return None
-    target = update.effective_message.reply_to_message
-    if target and target.from_user:
-        return target.from_user.id
-    return None
+def _parse_ids(update: Update, context: ContextTypes.DEFAULT_TYPE, kenh: bool = False) -> list[int]:
+    """Nhiều ID một lúc: "/add_user 111, 222 333" đều hiểu được.
 
-
-def _parse_eid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int | None:
-    """Lấy entity_id (user hoặc kênh) từ tham số đầu hoặc tin nhắn được reply."""
-    args = context.args or []
-    if args:
+    Không truyền ID nào thì lấy từ tin nhắn được reply.
+    kenh=True thì nhận cả ID kênh (sender_chat), dùng cho lệnh chặn.
+    """
+    raw = " ".join(context.args or []).replace(",", " ").replace(";", " ")
+    ra: list[int] = []
+    for phan in raw.split():
         try:
-            return int(args[0])
+            so = int(phan)
         except ValueError:
-            return None
+            continue
+        if so not in ra:
+            ra.append(so)
+    if ra:
+        return ra
+
     target = update.effective_message.reply_to_message
     if target:
-        if target.sender_chat:
-            return target.sender_chat.id
+        if kenh and target.sender_chat:
+            return [target.sender_chat.id]
         if target.from_user:
-            return target.from_user.id
-    return None
+            return [target.from_user.id]
+    return []
+
+
+def _danh_sach(ids: list[int]) -> str:
+    return "\n".join(f"• <code>{i}</code>" for i in ids)
 
 
 # ---------------------------------------------------------------------------
-# Chặn cứng người/kênh — /blockuser /unblockuser /blocked
+# Chặn cứng người/kênh — /block_user /unblock_user /list_blocked
 # ---------------------------------------------------------------------------
 
 
 async def cmd_blockuser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/blockuser [id|reply] — chặn cứng người/kênh, ban bất kể điểm số."""
+    """/block_user [id|reply] — chặn cứng người/kênh, ban bất kể điểm số."""
     if not await _require_admin(update, context):
         return
     scope = _write_scope(update)
-    eid = _parse_eid(update, context)
-    if eid is None:
+    ids = _parse_ids(update, context, kenh=True)
+    if not ids:
         await _quiet_reply(
             update, context,
-            "Reply vào tin của người/kênh đó, hoặc: <code>/blockuser &lt;id&gt;</code>\n\n"
+            "Reply vào tin của người/kênh đó, hoặc:\n"
+            "<code>/block_user 111, 222</code>\n\n"
             "Nhắn riêng bot → chặn ở <b>mọi nhóm</b>.",
         )
         return
-    await _db(context).add_blacklist(scope, eid)
+    db = _db(context)
+    for eid in ids:
+        await db.add_blacklist(scope, eid)
     await _quiet_reply(
         update, context,
-        f"⛔ Đã chặn cứng <code>{eid}</code> ở {_scope_label(scope)} — "
-        "mọi tin nhắn sẽ bị xoá và ban ngay.",
+        f"⛔ Chặn cứng <b>{len(ids)}</b> người/kênh ở {_scope_label(scope)}:\n{_danh_sach(ids)}\n"
+        "Mọi tin nhắn của họ sẽ bị xoá và ban ngay.",
     )
 
 
 async def cmd_unblockuser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/unblockuser [id|reply] — bỏ chặn cứng."""
+    """/unblock_user [id|reply] — bỏ chặn cứng."""
     if not await _require_admin(update, context):
         return
     scope = _write_scope(update)
-    eid = _parse_eid(update, context)
-    if eid is None:
-        await _quiet_reply(update, context, "Dùng: <code>/unblockuser &lt;id&gt;</code> hoặc reply.")
+    ids = _parse_ids(update, context, kenh=True)
+    if not ids:
+        await _quiet_reply(update, context, "Dùng: <code>/unblock_user 111, 222</code> hoặc reply.")
         return
-    n = await _db(context).remove_blacklist(scope, eid)
+    db = _db(context)
+    bo = [e for e in ids if await db.remove_blacklist(scope, e)]
     await _quiet_reply(
         update, context,
-        f"Đã bỏ chặn <code>{eid}</code> ở {_scope_label(scope)}." if n
-        else f"<code>{eid}</code> không có trong danh sách của {_scope_label(scope)}.",
+        f"Đã bỏ chặn <b>{len(bo)}</b> ở {_scope_label(scope)}:\n{_danh_sach(bo)}" if bo
+        else f"Không có ai trong danh sách chặn của {_scope_label(scope)}.",
     )
 
 
 async def cmd_blocked(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/blocked — danh sách bị chặn cứng (chung + riêng nhóm)."""
+    """/list_blocked — danh sách bị chặn cứng (chung + riêng nhóm)."""
     if not await _require_admin(update, context):
         return
     db = _db(context)
@@ -1405,7 +1409,7 @@ async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Acc seeding (forward whitelist) — /adduser /deluser /users
+# Acc seeding (forward whitelist) — /add_user /delete_user /list_users
 # ---------------------------------------------------------------------------
 
 
@@ -1414,43 +1418,48 @@ def _scope_label(scope: int) -> str:
 
 
 async def cmd_adduser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/adduser [user_id|reply] — thêm acc seeding được phép chuyển tiếp."""
+    """/add_user [user_id|reply] — thêm acc seeding được phép chuyển tiếp."""
     if not await _require_admin(update, context):
         return
     scope = _write_scope(update)
-    uid = _parse_uid(update, context)
-    if uid is None:
+    ids = _parse_ids(update, context)
+    if not ids:
         await _quiet_reply(
             update, context,
-            "Reply vào tin nhắn của acc đó, hoặc: <code>/adduser &lt;user_id&gt;</code>",
+            "Reply vào tin của acc đó, hoặc:\n"
+            "<code>/add_user 111222333</code>\n"
+            "<code>/add_user 111, 222, 333</code>",
         )
         return
-    await _db(context).add_fwd_whitelist(scope, uid)
+    db = _db(context)
+    for uid in ids:
+        await db.add_fwd_whitelist(scope, uid)
     await _quiet_reply(
         update, context,
-        f"✅ Acc seeding <code>{uid}</code> — được phép chuyển tiếp ở {_scope_label(scope)}.",
+        f"✅ Thêm <b>{len(ids)}</b> acc seeding ở {_scope_label(scope)}:\n{_danh_sach(ids)}",
     )
 
 
 async def cmd_deluser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/deluser [user_id|reply] — xoá acc seeding."""
+    """/delete_user [user_id|reply] — xoá acc seeding."""
     if not await _require_admin(update, context):
         return
     scope = _write_scope(update)
-    uid = _parse_uid(update, context)
-    if uid is None:
-        await _quiet_reply(update, context, "Dùng: <code>/deluser &lt;user_id&gt;</code> hoặc reply.")
+    ids = _parse_ids(update, context)
+    if not ids:
+        await _quiet_reply(update, context, "Dùng: <code>/delete_user 111, 222</code> hoặc reply.")
         return
-    n = await _db(context).remove_fwd_whitelist(scope, uid)
+    db = _db(context)
+    bo = [u for u in ids if await db.remove_fwd_whitelist(scope, u)]
     await _quiet_reply(
         update, context,
-        f"Đã xoá <code>{uid}</code> khỏi {_scope_label(scope)}." if n
-        else f"<code>{uid}</code> không có trong danh sách của {_scope_label(scope)}.",
+        f"Đã xoá <b>{len(bo)}</b> acc khỏi {_scope_label(scope)}:\n{_danh_sach(bo)}" if bo
+        else f"Không có acc nào trong danh sách của {_scope_label(scope)}.",
     )
 
 
 async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/users — danh sách acc seeding (chung + riêng nhóm)."""
+    """/list_users — danh sách acc seeding (chung + riêng nhóm)."""
     if not await _require_admin(update, context):
         return
     db = _db(context)
@@ -1468,88 +1477,100 @@ async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Bot admin — /addadm /deladm /admins  (chỉ owner mới thêm/xoá được)
+# Bot admin — /add_admin /delete_admin /list_admins  (chỉ owner mới thêm/xoá được)
 # ---------------------------------------------------------------------------
 
 
 async def cmd_addadm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/addadm [user_id|reply] — thêm bot admin (chỉ owner)."""
+    """/add_admin [user_id|reply] — thêm bot admin (chỉ owner)."""
     if not _require_owner(update, context):
         try:
             await update.effective_message.delete()
         except TelegramError:
             pass
         return
-    msg = update.effective_message
-    uid = _parse_uid(update, context)
-    if uid is None:
+    ids = _parse_ids(update, context)
+    if not ids:
         await _quiet_reply(
             update, context,
-            "Reply vào tin nhắn của người đó, hoặc: <code>/addadm &lt;user_id&gt;</code>\n"
+            "Reply vào tin nhắn của người đó, hoặc:\n"
+            "<code>/add_admin 111, 222</code>\n"
             "Người đó gõ /id để lấy ID của mình.",
         )
         return
-    if uid in _cfg(context).owner_ids:
-        await _quiet_reply(update, context, f"<code>{uid}</code> đã là owner, không cần thêm.")
-        return
 
-    # Không nhận tài khoản bot: bot không nhắn riêng cho bot khác được,
-    # nên chúng không thể dùng bảng điều khiển.
-    target = msg.reply_to_message
-    if target and target.from_user and target.from_user.id == uid and target.from_user.is_bot:
-        await _quiet_reply(
-            update, context,
-            "Không thêm được tài khoản bot làm admin. Hãy dùng nick thật (nick người)."
+    db = _db(context)
+    cfg = _cfg(context)
+    them: list[str] = []
+    bo_qua: list[str] = []
+    chua_start: list[int] = []
+
+    for uid in ids:
+        if uid in cfg.owner_ids:
+            bo_qua.append(f"<code>{uid}</code> đã là owner")
+            continue
+
+        # Không nhận tài khoản bot: bot không nhắn riêng cho bot khác được,
+        # nên chúng không thể dùng bảng điều khiển.
+        ten = f"<code>{uid}</code>"
+        try:
+            info = await context.bot.get_chat(uid)
+            if getattr(info, "is_bot", False) or info.type != ChatType.PRIVATE:
+                bo_qua.append(f"<code>{uid}</code> không phải nick người")
+                continue
+            ho_ten = html.escape(info.full_name or info.first_name or str(uid))
+            ten = f"<b>{ho_ten}</b> (<code>{uid}</code>)"
+        except TelegramError:
+            pass  # Chưa từng chat với bot — vẫn thêm được, chỉ không hiện tên.
+
+        await db.add_bot_admin(uid)
+        if not await _apply_admin_menu(context.bot, uid, is_owner=False):
+            chua_start.append(uid)
+        them.append(ten)
+
+    _invalidate_rules(context)
+    phan: list[str] = []
+    if them:
+        phan.append(f"✅ Đã thêm <b>{len(them)}</b> bot admin:\n" + "\n".join(f"• {t}" for t in them))
+    if bo_qua:
+        phan.append("Bỏ qua:\n" + "\n".join(f"• {t}" for t in bo_qua))
+    if chua_start:
+        phan.append(
+            "⚠️ Chưa bấm Start với bot nên chưa thấy menu: "
+            + ", ".join(f"<code>{u}</code>" for u in chua_start)
+            + "\nBảo họ mở chat riêng bấm Start — lệnh vẫn gõ tay được ngay."
         )
-        return
-
-    # Lấy tên để xác nhận rõ đang thêm đúng người.
-    ten = f"<code>{uid}</code>"
-    try:
-        info = await context.bot.get_chat(uid)
-        if getattr(info, "is_bot", False) or info.type != ChatType.PRIVATE:
-            await _quiet_reply(
-                update, context,
-                "ID này không phải nick người dùng thật. Hãy dùng nick thật (không phải bot/kênh)."
-            )
-            return
-        ho_ten = html.escape(info.full_name or info.first_name or str(uid))
-        ten = f"<b>{ho_ten}</b> (<code>{uid}</code>)"
-    except TelegramError:
-        pass  # Chưa từng chat với bot — vẫn thêm được, chỉ không hiện tên.
-
-    await _db(context).add_bot_admin(uid)
-    ok = await _apply_admin_menu(context.bot, uid, is_owner=False)
-    note = "" if ok else (
-        "\n\n⚠️ Người này chưa bấm Start với bot nên chưa thấy menu. "
-        "Bảo họ mở chat riêng với bot và bấm Start — lệnh vẫn dùng được ngay bằng cách gõ tay."
-    )
-    await _quiet_reply(update, context, f"✅ Đã thêm bot admin {ten}.{note}")
+    await _quiet_reply(update, context, "\n\n".join(phan) or "Không thêm được ai.")
 
 
 async def cmd_deladm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/deladm [user_id|reply] — xoá bot admin (chỉ owner)."""
+    """/delete_admin [user_id|reply] — xoá bot admin (chỉ owner)."""
     if not _require_owner(update, context):
         try:
             await update.effective_message.delete()
         except TelegramError:
             pass
         return
-    uid = _parse_uid(update, context)
-    if uid is None:
-        await _quiet_reply(update, context, "Dùng: <code>/deladm &lt;user_id&gt;</code> hoặc reply.")
+    ids = _parse_ids(update, context)
+    if not ids:
+        await _quiet_reply(update, context, "Dùng: <code>/delete_admin 111, 222</code> hoặc reply.")
         return
-    n = await _db(context).remove_bot_admin(uid)
-    if n:
-        await _clear_admin_menu(context.bot, uid)
+    db = _db(context)
+    bo: list[int] = []
+    for uid in ids:
+        if await db.remove_bot_admin(uid):
+            await _clear_admin_menu(context.bot, uid)
+            bo.append(uid)
+    _invalidate_rules(context)
     await _quiet_reply(
         update, context,
-        f"Đã xoá bot admin <code>{uid}</code>." if n else f"<code>{uid}</code> không có trong danh sách.",
+        f"Đã xoá <b>{len(bo)}</b> bot admin:\n{_danh_sach(bo)}" if bo
+        else "Không ai trong số đó là bot admin.",
     )
 
 
 async def cmd_admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/admins — danh sách bot admin."""
+    """/list_admins — danh sách bot admin."""
     if not await _require_admin(update, context):
         return
     ids = await _db(context).get_bot_admins()
@@ -1571,12 +1592,12 @@ async def cmd_admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 # ---------------------------------------------------------------------------
-# Keyword blacklist — /addblacklist /delblacklist /bwords
+# Keyword blacklist — /add_word /delete_word /list_words
 # ---------------------------------------------------------------------------
 
 
 async def cmd_addblacklist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/addblacklist <cụm từ>[, <cụm từ>...] — thêm từ ban ngay khi gửi.
+    """/add_word <cụm từ>[, <cụm từ>...] — thêm từ ban ngay khi gửi.
 
     Nhắn riêng bot → áp dụng mọi nhóm. Gõ trong nhóm → chỉ nhóm đó.
     Nhiều cụm một lúc: ngăn cách bằng dấu phẩy.
@@ -1587,8 +1608,8 @@ async def cmd_addblacklist(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not context.args:
         await _quiet_reply(
             update, context,
-            "Dùng: <code>/addblacklist lừa đảo</code>\n"
-            "Nhiều cụm: <code>/addblacklist lừa đảo, scam, tuyển ctv</code>\n\n"
+            "Dùng: <code>/add_word lừa đảo</code>\n"
+            "Nhiều cụm: <code>/add_word lừa đảo, scam, tuyển ctv</code>\n\n"
             "Nhắn riêng bot → cấm ở <b>mọi nhóm</b>.\n"
             "Gõ trong nhóm → chỉ cấm ở nhóm đó.",
         )
@@ -1609,12 +1630,12 @@ async def cmd_addblacklist(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def cmd_delblacklist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/delblacklist <cụm từ>[, <cụm từ>...] — xoá từ khỏi danh sách cấm."""
+    """/delete_word <cụm từ>[, <cụm từ>...] — xoá từ khỏi danh sách cấm."""
     if not await _require_admin(update, context):
         return
     scope = _write_scope(update)
     if not context.args:
-        await _quiet_reply(update, context, "Dùng: <code>/delblacklist &lt;cụm từ&gt;</code>")
+        await _quiet_reply(update, context, "Dùng: <code>/delete_word &lt;cụm từ&gt;</code>")
         return
     phrases = [p.strip() for p in " ".join(context.args).split(",") if p.strip()]
     db = _db(context)
@@ -1695,18 +1716,18 @@ async def cmd_preset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "\n\n⚠️ <b>Bộ 'tocao' đã được nạp.</b> Đây là từ người dùng nói khi "
             "cảnh báo nhau về lừa đảo. Từ giờ ai nhắn <i>\"cái này lừa đảo đấy\"</i> "
             "sẽ bị ban ngay, kể cả khi họ đang nói đúng và giúp nhóm.\n"
-            "Gỡ bằng: <code>/unpreset tocao</code>"
+            "Gỡ bằng: <code>/delete_preset tocao</code>"
         )
     await _quiet_reply(
         update, context,
         f"✅ Đã nạp <b>{labels}</b> vào {_scope_label(scope)}\n"
         f"Thêm mới: <b>{len(added)}</b> cụm (đã có sẵn: {len(phrases) - len(added)})\n"
-        f"Xem tất cả: /bwords{canh_bao}",
+        f"Xem tất cả: /list_words{canh_bao}",
     )
 
 
 async def cmd_unpreset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/unpreset <tên> — gỡ một bộ từ cấm đã nạp."""
+    """/delete_preset <tên> — gỡ một bộ từ cấm đã nạp."""
     if not await _require_admin(update, context):
         return
     scope = _write_scope(update)
@@ -1715,7 +1736,7 @@ async def cmd_unpreset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not names:
         await _quiet_reply(
             update, context,
-            "Dùng: <code>/unpreset cobac</code>\nGõ <code>/preset</code> để xem danh sách.",
+            "Dùng: <code>/delete_preset cobac</code>\nGõ <code>/preset</code> để xem danh sách.",
         )
         return
     db = _db(context)
@@ -1729,7 +1750,7 @@ async def cmd_unpreset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def cmd_bwords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/bwords — danh sách từ cấm (chung + riêng nhóm)."""
+    """/list_words — danh sách từ cấm (chung + riêng nhóm)."""
     if not await _require_admin(update, context):
         return
     db = _db(context)
@@ -1747,7 +1768,7 @@ async def cmd_bwords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 # ---------------------------------------------------------------------------
-# Domain whitelist — /addlink /dellink /links
+# Domain whitelist — /add_link /delete_link /list_links
 # ---------------------------------------------------------------------------
 
 
@@ -1764,22 +1785,22 @@ def _clean_domain(raw: str) -> str:
 
 
 async def cmd_addlink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/addlink <domain>[, <domain>...] — thêm domain được phép xuất hiện."""
+    """/add_link <domain>[, <domain>...] — thêm domain được phép xuất hiện."""
     if not await _require_admin(update, context):
         return
     scope = _write_scope(update)
     if not context.args:
         await _quiet_reply(
             update, context,
-            "Dùng: <code>/addlink example.com</code>\n"
-            "Nhiều domain: <code>/addlink shopee.vn, tiki.vn</code>\n\n"
+            "Dùng: <code>/add_link example.com</code>\n"
+            "Nhiều domain: <code>/add_link shopee.vn, tiki.vn</code>\n\n"
             "Nhắn riêng bot → cho phép ở <b>mọi nhóm</b>.",
         )
         return
     raw_parts = " ".join(context.args).replace(",", " ").split()
     domains = [d for d in (_clean_domain(p) for p in raw_parts) if d and "." in d]
     if not domains:
-        await _quiet_reply(update, context, "Domain không hợp lệ. VD: <code>/addlink example.com</code>")
+        await _quiet_reply(update, context, "Domain không hợp lệ. VD: <code>/add_link example.com</code>")
         return
     db = _db(context)
     for d in domains:
@@ -1791,12 +1812,12 @@ async def cmd_addlink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_dellink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/dellink <domain>[, <domain>...] — xoá domain khỏi whitelist."""
+    """/delete_link <domain>[, <domain>...] — xoá domain khỏi whitelist."""
     if not await _require_admin(update, context):
         return
     scope = _write_scope(update)
     if not context.args:
-        await _quiet_reply(update, context, "Dùng: <code>/dellink example.com</code>")
+        await _quiet_reply(update, context, "Dùng: <code>/delete_link example.com</code>")
         return
     raw_parts = " ".join(context.args).replace(",", " ").split()
     domains = [d for d in (_clean_domain(p) for p in raw_parts) if d]
@@ -1810,7 +1831,7 @@ async def cmd_dellink(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_links(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/links — danh sách domain được phép (chung + riêng nhóm + config)."""
+    """/list_links — danh sách domain được phép (chung + riêng nhóm + config)."""
     if not await _require_admin(update, context):
         return
     db = _db(context)
@@ -1925,9 +1946,9 @@ async def _show_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _quiet_reply(
             update, context,
             "Chưa đăng ký nhóm nào.\n\n"
-            "<code>/setgroup -100111 -100222</code> — đặt danh sách\n"
-            "<code>/setgroup add -100333</code> — thêm một nhóm\n"
-            "<code>/setgroup del -100333</code> — bỏ một nhóm\n\n"
+            "<code>/set_group -100111 -100222</code> — đặt danh sách\n"
+            "<code>/set_group add -100333</code> — thêm một nhóm\n"
+            "<code>/set_group del -100333</code> — bỏ một nhóm\n\n"
             "Lấy chat_id bằng cách gõ /id trong nhóm đó.",
         )
         return
@@ -1941,12 +1962,12 @@ async def _show_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _quiet_reply(
         update, context,
         f"<b>Nhóm đang quản lý</b> ({len(groups)}):\n" + "\n".join(lines) +
-        "\n\n<code>/setgroup add|del &lt;chat_id&gt;</code> để sửa danh sách.",
+        "\n\n<code>/set_group add|del &lt;chat_id&gt;</code> để sửa danh sách.",
     )
 
 
 # ---------------------------------------------------------------------------
-# @username được phép — /addat /delat /ats
+# @username được phép — /add_username /delete_username /list_usernames
 # ---------------------------------------------------------------------------
 
 
@@ -1955,7 +1976,7 @@ def _clean_at(raw: str) -> str:
 
 
 async def cmd_addat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/addat @user [@user2...] — cho phép nhắc tới các @ này."""
+    """/add_username @user [@user2...] — cho phép nhắc tới các @ này."""
     if not await _require_admin(update, context):
         return
     scope = _write_scope(update)
@@ -1971,8 +1992,8 @@ async def cmd_addat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not names:
         await _quiet_reply(
             update, context,
-            "Dùng: <code>/addat @kenhcuaban</code>\n"
-            "Nhiều cái: <code>/addat @a, @b</code>\n"
+            "Dùng: <code>/add_username @kenhcuaban</code>\n"
+            "Nhiều cái: <code>/add_username @a, @b</code>\n"
             "Hoặc reply vào tin nhắn của người đó.\n\n"
             "@ của admin nhóm đã tự được phép, không cần thêm.",
         )
@@ -1985,14 +2006,14 @@ async def cmd_addat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_delat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/delat @user — bỏ khỏi danh sách @ được phép."""
+    """/delete_username @user — bỏ khỏi danh sách @ được phép."""
     if not await _require_admin(update, context):
         return
     scope = _write_scope(update)
     raws = " ".join(context.args or []).replace(",", " ").split()
     names = [n for n in (_clean_at(r) for r in raws) if n]
     if not names:
-        await _quiet_reply(update, context, "Dùng: <code>/delat @kenhcuaban</code>")
+        await _quiet_reply(update, context, "Dùng: <code>/delete_username @kenhcuaban</code>")
         return
     db = _db(context)
     removed = [n for n in names if await db.remove_username(scope, n)]
@@ -2004,7 +2025,7 @@ async def cmd_delat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_ats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/ats — danh sách @ được phép nhắc."""
+    """/list_usernames — danh sách @ được phép nhắc."""
     if not await _require_admin(update, context):
         return
     db = _db(context)
@@ -2033,7 +2054,7 @@ async def cmd_anon(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     targets = await _target_chat_ids(update, context)
     if not targets:
-        await _quiet_reply(update, context, "Chưa đăng ký nhóm nào. Dùng /setgroup")
+        await _quiet_reply(update, context, "Chưa đăng ký nhóm nào. Dùng /set_group")
         return
 
     huong_dan = (
@@ -2093,7 +2114,7 @@ async def _panel_text(context: ContextTypes.DEFAULT_TYPE) -> str:
     canh_bao = ""
     if brake and time.time() - brake < 86400:
         khi = datetime.fromtimestamp(brake).strftime("%H:%M %d/%m")
-        canh_bao = f"\n\n🛑 Bot đã tự phanh lúc {khi}. Kiểm tra /lastbans trước khi bật lại."
+        canh_bao = f"\n\n🛑 Bot đã tự phanh lúc {khi}. Kiểm tra /last_bans trước khi bật lại."
 
     return (
         f"🛡 <b>Bảng điều khiển</b>\n\n{trang_thai}\n"
@@ -2182,7 +2203,7 @@ async def _bans_text(context: ContextTypes.DEFAULT_TYPE, limit: int = 10) -> str
 
 
 async def cmd_lastbans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/lastbans — xem các lượt xử lý gần nhất kèm lý do."""
+    """/last_bans — xem các lượt xử lý gần nhất kèm lý do."""
     if not await _require_admin(update, context):
         return
     await _quiet_reply(update, context, await _bans_text(context))
@@ -2370,7 +2391,7 @@ def _clean_phone(raw: str) -> str:
 
 
 async def cmd_addphone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/addphone <số> — cho phép số điện thoại này xuất hiện."""
+    """/add_phone <số> — cho phép số điện thoại này xuất hiện."""
     if not await _require_admin(update, context):
         return
     scope = _write_scope(update)
@@ -2379,8 +2400,8 @@ async def cmd_addphone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not so:
         await _quiet_reply(
             update, context,
-            "Dùng: <code>/addphone 0912345678</code>\n"
-            "Nhiều số: <code>/addphone 0912345678, 0987654321</code>\n\n"
+            "Dùng: <code>/add_phone 0912345678</code>\n"
+            "Nhiều số: <code>/add_phone 0912345678, 0987654321</code>\n\n"
             "Mọi số KHÔNG có trong danh sách sẽ bị chặn.",
         )
         return
@@ -2392,14 +2413,14 @@ async def cmd_addphone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def cmd_delphone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/delphone <số> — bỏ số khỏi danh sách được phép."""
+    """/delete_phone <số> — bỏ số khỏi danh sách được phép."""
     if not await _require_admin(update, context):
         return
     scope = _write_scope(update)
     raws = " ".join(context.args or []).replace(",", " ").split()
     so = [s for s in (_clean_phone(r) for r in raws) if s]
     if not so:
-        await _quiet_reply(update, context, "Dùng: <code>/delphone 0912345678</code>")
+        await _quiet_reply(update, context, "Dùng: <code>/delete_phone 0912345678</code>")
         return
     db = _db(context)
     bo = [s for s in so if await db.remove_phone(scope, s)]
@@ -2411,7 +2432,7 @@ async def cmd_delphone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def cmd_phones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/phones — danh sách số điện thoại được phép."""
+    """/list_phones — danh sách số điện thoại được phép."""
     if not await _require_admin(update, context):
         return
     db = _db(context)
@@ -2494,7 +2515,7 @@ async def cmd_web(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Quét lại và đuổi người đã bị ban khỏi mọi nhóm — /quetlai
+# Quét lại và đuổi người đã bị ban khỏi mọi nhóm — /purge_all
 # ---------------------------------------------------------------------------
 
 
@@ -2505,7 +2526,7 @@ async def _chay_quet_lai(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_i
       * bỏ qua cặp (người, nhóm) đã ban rồi - đỡ được vài trăm lệnh
       * giới hạn số lệnh chạy cùng lúc, tránh đụng trần tốc độ của Telegram
       * sửa lại chính tin nhắn tiến độ thay vì gửi tin mới
-      * dừng được giữa chừng bằng /dungquet
+      * dừng được giữa chừng bằng /stop_purge
     """
     bd = context.application.bot_data
     db = _db(context)
@@ -2565,7 +2586,7 @@ async def _chay_quet_lai(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_i
                     f"Đã xét: <b>{i}</b>/{tong} người\n"
                     f"Đã đuổi thêm: <b>{duoi_duoc}</b> lượt\n"
                     f"Còn khoảng {con:.0f} phút\n\n"
-                    f"Dừng giữa chừng: /dungquet",
+                    f"Dừng giữa chừng: /stop_purge",
                     chat_id=chat_id, message_id=msg_id, parse_mode="HTML",
                 )
             except TelegramError:
@@ -2587,7 +2608,7 @@ async def _chay_quet_lai(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_i
 
 
 async def cmd_quetlai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/quetlai — đuổi mọi người từng bị ban khỏi tất cả nhóm đang quản lý."""
+    """/purge_all — đuổi mọi người từng bị ban khỏi tất cả nhóm đang quản lý."""
     if not _require_owner(update, context):
         try:
             await update.effective_message.delete()
@@ -2596,7 +2617,7 @@ async def cmd_quetlai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     bd = context.application.bot_data
     if bd.get("quet_dang_chay"):
-        await _quiet_reply(update, context, "Đang quét rồi. Dừng bằng /dungquet.")
+        await _quiet_reply(update, context, "Đang quét rồi. Dừng bằng /stop_purge.")
         return
 
     db = _db(context)
@@ -2617,7 +2638,7 @@ async def cmd_quetlai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             f"<b>{max(con_lai, 0) / 600:.0f}-{max(con_lai, 0) / 300:.0f} phút</b>.\n\n"
             f"Người là admin nhóm sẽ được tha.\n"
             f"Việc này <b>không hoàn tác được</b>.\n\n"
-            f"Chắc chắn thì gõ: <code>/quetlai ok</code>".replace(",", "."),
+            f"Chắc chắn thì gõ: <code>/purge_all ok</code>".replace(",", "."),
         )
         return
 
@@ -2628,7 +2649,7 @@ async def cmd_quetlai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_dungquet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/dungquet — dừng việc quét lại đang chạy."""
+    """/stop_purge — dừng việc quét lại đang chạy."""
     if not _require_owner(update, context):
         return
     bd = context.application.bot_data
@@ -2640,12 +2661,12 @@ async def cmd_dungquet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def cmd_setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/setgroup — quản lý danh sách nhóm (chỉ owner, trong chat riêng).
+    """/set_group — quản lý danh sách nhóm (chỉ owner, trong chat riêng).
 
-    /setgroup                      → xem danh sách
-    /setgroup -100111 -100222      → đặt lại toàn bộ danh sách
-    /setgroup add -100333          → thêm
-    /setgroup del -100333          → bỏ
+    /set_group                      → xem danh sách
+    /set_group -100111 -100222      → đặt lại toàn bộ danh sách
+    /set_group add -100333          → thêm
+    /set_group del -100333          → bỏ
     """
     msg = update.effective_message
     if msg is None:
@@ -2688,7 +2709,7 @@ async def cmd_setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             except ValueError:
                 continue
         if not ids:
-            await _quiet_reply(update, context, "Thiếu chat_id. VD: <code>/setgroup add -100111</code>")
+            await _quiet_reply(update, context, "Thiếu chat_id. VD: <code>/set_group add -100111</code>")
             return
         if sub in ("add", "them", "thêm"):
             added = [i for i in ids if i not in groups]
@@ -2702,7 +2723,7 @@ async def cmd_setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _quiet_reply(update, context, f"{note}\nCòn lại: <b>{len(groups)}</b> nhóm.")
         return
 
-    # Đặt lại toàn bộ danh sách: /setgroup -100111 -100222 -100333
+    # Đặt lại toàn bộ danh sách: /set_group -100111 -100222 -100333
     ids = []
     for r in args:
         try:
@@ -2732,14 +2753,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_owner or (user and await db.is_bot_admin(user.id)):
         groups = await _managed_groups(context)
         group_line = (
-            f"Đang quản lý <b>{len(groups)}</b> nhóm — /setgroup để xem"
+            f"Đang quản lý <b>{len(groups)}</b> nhóm — /set_group để xem"
             if groups
-            else "Chưa có nhóm nào — thêm bot vào nhóm, hoặc <code>/setgroup -100XXX</code>"
+            else "Chưa có nhóm nào — thêm bot vào nhóm, hoặc <code>/set_group -100XXX</code>"
         )
         owner_only = (
             "\n<b>Chỉ owner</b>\n"
-            "/addadm · /deladm — bot admin\n"
-            "/setgroup — danh sách nhóm\n"
+            "/add_admin · /delete_admin — bot admin\n"
+            "/set_group — danh sách nhóm\n"
             if is_owner else ""
         )
         await _quiet_reply(
@@ -2751,22 +2772,22 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "Muốn chỉ một nhóm thì gõ lệnh trong nhóm đó.\n\n"
             "<b>Từ cấm</b> — ai gửi là ban ngay\n"
             "/preset — nạp bộ dựng sẵn (nên bắt đầu từ đây)\n"
-            "<code>/addblacklist cụm từ, cụm từ</code>\n"
-            "/delblacklist · /bwords\n\n"
+            "<code>/add_word cụm từ, cụm từ</code>\n"
+            "/delete_word · /list_words\n\n"
             "<b>Acc seeding</b> — được phép forward\n"
-            "/adduser &lt;id&gt; · /deluser · /users\n\n"
+            "/add_user &lt;id&gt; · /delete_user · /list_users\n\n"
             "<b>Link được phép</b>\n"
-            "<code>/addlink t.me/kenhcuaban</code>\n"
-            "/dellink · /links\n\n"
+            "<code>/add_link t.me/kenhcuaban</code>\n"
+            "/delete_link · /list_links\n\n"
             "<b>@ được phép nhắc</b> — @ khác là ban\n"
-            "<code>/addat @kenhcuaban</code>\n"
-            "/delat · /ats  (admin nhóm tự được phép)\n\n"
+            "<code>/add_username @kenhcuaban</code>\n"
+            "/delete_username · /list_usernames  (admin nhóm tự được phép)\n\n"
             "<b>Chặn cứng người/kênh</b>\n"
-            "/blockuser &lt;id&gt; · /unblockuser · /blocked\n\n"
+            "/block_user &lt;id&gt; · /unblock_user · /list_blocked\n\n"
             "<b>Tin dịch vụ</b> — vào/rời/ghim nhóm\n"
             "<code>/services join,leave,pin</code> · /services off\n\n"
             "<b>Khác</b>\n"
-            "/status · /admins · /trust &lt;id&gt; · /unban &lt;id&gt;\n"
+            "/status · /list_admins · /trust &lt;id&gt; · /unban &lt;id&gt;\n"
             f"{owner_only}",
         )
         return
@@ -2815,51 +2836,71 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Telegram hiện menu theo đúng thứ tự này, nên xếp cái hay dùng lên trước.
 _OWNER_CMDS = [
-    BotCommand("status", "Trạng thái mọi nhóm"),
-    BotCommand("preset", "Nạp bộ từ cấm dựng sẵn"),
-    BotCommand("unpreset", "Gỡ bộ từ cấm"),
-    BotCommand("addblacklist", "Cấm từ/cụm từ (mọi nhóm)"),
-    BotCommand("delblacklist", "Bỏ từ cấm"),
-    BotCommand("bwords", "Danh sách từ cấm"),
-    BotCommand("adduser", "Thêm acc seeding (được forward)"),
-    BotCommand("deluser", "Xoá acc seeding"),
-    BotCommand("users", "Danh sách acc seeding"),
-    BotCommand("addlink", "Cho phép domain"),
-    BotCommand("dellink", "Bỏ domain"),
-    BotCommand("links", "Danh sách domain"),
-    BotCommand("addat", "Cho phép nhắc @username"),
-    BotCommand("delat", "Bỏ @username được phép"),
-    BotCommand("ats", "Danh sách @ được phép"),
-    BotCommand("blockuser", "Chặn cứng người/kênh"),
-    BotCommand("unblockuser", "Bỏ chặn cứng"),
-    BotCommand("blocked", "Danh sách chặn cứng"),
-    BotCommand("services", "Tự xoá tin vào/rời/ghim nhóm"),
-    BotCommand("anon", "Kiểm tra bot đã ẩn danh chưa"),
-    BotCommand("addadm", "Thêm bot admin"),
-    BotCommand("deladm", "Xoá bot admin"),
-    BotCommand("admins", "Danh sách bot admin"),
-    BotCommand("addphone", "Cho phép số điện thoại"),
-    BotCommand("phones", "Danh sách SĐT được phép"),
-    BotCommand("web", "Mở bảng điều khiển web"),
-    BotCommand("quetlai", "Đuổi người đã ban khỏi mọi nhóm"),
-    BotCommand("setgroup", "Quản lý danh sách nhóm"),
-    BotCommand("id", "Xem ID Telegram của bạn"),
+    # Điều khiển
+    BotCommand("panel", "🎛 Bảng điều khiển (bấm nút)"),
+    BotCommand("status", "📊 Trạng thái mọi nhóm"),
+    BotCommand("pause", "⏸ Tạm ngưng xử phạt"),
+    BotCommand("resume", "▶️ Bật lại"),
+    BotCommand("action", "🔧 Đổi chế độ ban/mute/report"),
+    # Xem lại và sửa sai
+    BotCommand("last_bans", "📋 Các lượt ban gần đây"),
+    BotCommand("undo", "↩️ Gỡ lượt ban vừa rồi"),
+    BotCommand("unban", "🔓 Gỡ chặn theo ID"),
+    # Từ cấm
+    BotCommand("preset", "📦 Nạp bộ từ cấm dựng sẵn"),
+    BotCommand("delete_preset", "Gỡ bộ từ cấm"),
+    BotCommand("add_word", "➕ Cấm từ/cụm từ"),
+    BotCommand("delete_word", "➖ Bỏ từ cấm"),
+    BotCommand("list_words", "📄 Danh sách từ cấm"),
+    # Acc seeding
+    BotCommand("add_user", "➕ Thêm acc seeding"),
+    BotCommand("delete_user", "➖ Xoá acc seeding"),
+    BotCommand("list_users", "📄 Danh sách acc seeding"),
+    # Link
+    BotCommand("add_link", "➕ Cho phép domain"),
+    BotCommand("delete_link", "➖ Bỏ domain"),
+    BotCommand("list_links", "📄 Danh sách domain"),
+    # @username
+    BotCommand("add_username", "➕ Cho phép nhắc @"),
+    BotCommand("delete_username", "➖ Bỏ @ được phép"),
+    BotCommand("list_usernames", "📄 Danh sách @ được phép"),
+    # Số điện thoại
+    BotCommand("add_phone", "➕ Cho phép số điện thoại"),
+    BotCommand("delete_phone", "➖ Bỏ số điện thoại"),
+    BotCommand("list_phones", "📄 Danh sách SĐT được phép"),
+    # Chặn cứng
+    BotCommand("block_user", "⛔ Chặn cứng người/kênh"),
+    BotCommand("unblock_user", "Bỏ chặn cứng"),
+    BotCommand("list_blocked", "📄 Danh sách chặn cứng"),
+    # Dọn dẹp hàng loạt
+    BotCommand("purge_all", "🧹 Đuổi người đã ban khỏi mọi nhóm"),
+    BotCommand("stop_purge", "⏹ Dừng việc dọn dẹp"),
+    # Quản trị
+    BotCommand("add_admin", "👤 Thêm bot admin"),
+    BotCommand("delete_admin", "Xoá bot admin"),
+    BotCommand("list_admins", "📄 Danh sách bot admin"),
+    BotCommand("set_group", "🗂 Quản lý danh sách nhóm"),
+    BotCommand("services", "🧽 Tự xoá tin vào/rời/ghim"),
+    BotCommand("anon", "🕶 Kiểm tra bot đã ẩn danh chưa"),
+    BotCommand("web", "🌐 Mở bảng điều khiển web"),
+    BotCommand("id", "🆔 Xem ID Telegram của bạn"),
 ]
 
 _GROUP_ADMIN_CMDS = [
     BotCommand("panel", "Bảng điều khiển (bấm nút)"),
-    BotCommand("lastbans", "Xem các lượt ban gần đây"),
+    BotCommand("last_bans", "Xem các lượt ban gần đây"),
     BotCommand("undo", "Gỡ lượt ban vừa rồi"),
     BotCommand("status", "Trạng thái và thống kê"),
     BotCommand("preset", "Nạp bộ từ cấm dựng sẵn"),
-    BotCommand("addblacklist", "Cấm từ ở nhóm này"),
-    BotCommand("adduser", "Thêm acc seeding (reply hoặc id)"),
-    BotCommand("addlink", "Cho phép domain ở nhóm này"),
-    BotCommand("addat", "Cho phép nhắc @username"),
-    BotCommand("addphone", "Cho phép số điện thoại"),
-    BotCommand("ats", "Danh sách @ được phép"),
-    BotCommand("blockuser", "Chặn cứng (reply hoặc id)"),
+    BotCommand("add_word", "Cấm từ ở nhóm này"),
+    BotCommand("add_user", "Thêm acc seeding (reply hoặc id)"),
+    BotCommand("add_link", "Cho phép domain ở nhóm này"),
+    BotCommand("add_username", "Cho phép nhắc @username"),
+    BotCommand("add_phone", "Cho phép số điện thoại"),
+    BotCommand("list_usernames", "Danh sách @ được phép"),
+    BotCommand("block_user", "Chặn cứng (reply hoặc id)"),
     BotCommand("services", "Tự xoá tin vào/rời/ghim nhóm"),
     BotCommand("anon", "Kiểm tra bot đã ẩn danh chưa"),
     BotCommand("check", "Chấm điểm thử tin nhắn (reply)"),
@@ -2870,7 +2911,8 @@ _GROUP_ADMIN_CMDS = [
 
 
 # Lệnh chỉ owner mới dùng được — ẩn khỏi menu của bot admin thường.
-_OWNER_ONLY = {"addadm", "deladm", "setgroup", "web", "quetlai", "dungquet"}
+_OWNER_ONLY = {"add_admin", "delete_admin", "set_group", "web",
+               "purge_all", "stop_purge"}
 
 
 async def _apply_admin_menu(bot, user_id: int, is_owner: bool = False) -> bool:
@@ -2950,7 +2992,7 @@ async def _setup_commands(app: Application) -> None:
 
     - Người thường (mặc định + chat riêng): trống — bot ẩn hoàn toàn.
     - Admin nhóm: bộ lệnh quản trị đầy đủ trong nhóm.
-    - Owner (chat riêng với bot): bộ lệnh quản trị + /setgroup.
+    - Owner (chat riêng với bot): bộ lệnh quản trị + /set_group.
     """
     cfg: Config = app.bot_data["cfg"]
     db: Storage = app.bot_data["db"]
@@ -2968,7 +3010,7 @@ async def _setup_commands(app: Application) -> None:
 
     # Bot admin chưa bao giờ bấm Start thì không đặt menu được, và cũng không
     # dùng được bảng điều khiển. Xoá luôn khỏi DB cho danh sách khỏi rác -
-    # owner thêm lại bằng /addadm sau khi họ bấm Start là xong.
+    # owner thêm lại bằng /add_admin sau khi họ bấm Start là xong.
     can_dat = [u for u in await db.get_bot_admins() if u not in cfg.owner_ids]
     ket_qua = await asyncio.gather(*(
         _apply_admin_menu(app.bot, uid, is_owner=False) for uid in can_dat
@@ -2981,7 +3023,7 @@ async def _setup_commands(app: Application) -> None:
     if bo_di:
         log.info(
             "Đã bỏ %d bot admin chưa bấm Start với bot: %s. "
-            "Bảo họ mở chat riêng bấm Start rồi /addadm lại.",
+            "Bảo họ mở chat riêng bấm Start rồi /add_admin lại.",
             len(bo_di), ", ".join(str(u) for u in bo_di),
         )
 
@@ -3093,7 +3135,7 @@ async def _post_init(app: Application) -> None:
     raw = await db.get_setting("home_group")
     ids = [p.strip() for p in (raw or "").split(",") if p.strip()]
     if not ids:
-        log.info("Nhóm: chưa đăng ký nhóm nào — dùng /setgroup")
+        log.info("Nhóm: chưa đăng ký nhóm nào — dùng /set_group")
     else:
         await _kiem_tra_nhom(app, ids)
 
@@ -3232,48 +3274,48 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler("trust", cmd_trust))
     app.add_handler(CommandHandler("unban", cmd_unban))
     # Acc seeding
-    app.add_handler(CommandHandler("adduser", cmd_adduser))
-    app.add_handler(CommandHandler("deluser", cmd_deluser))
-    app.add_handler(CommandHandler("users", cmd_users))
+    app.add_handler(CommandHandler(["add_user", "adduser"], cmd_adduser))
+    app.add_handler(CommandHandler(["delete_user", "deluser"], cmd_deluser))
+    app.add_handler(CommandHandler(["list_users", "users"], cmd_users))
     # Bot admin
-    app.add_handler(CommandHandler("addadm", cmd_addadm))
-    app.add_handler(CommandHandler("deladm", cmd_deladm))
-    app.add_handler(CommandHandler("admins", cmd_admins))
+    app.add_handler(CommandHandler(["add_admin", "addadm"], cmd_addadm))
+    app.add_handler(CommandHandler(["delete_admin", "deladm"], cmd_deladm))
+    app.add_handler(CommandHandler(["list_admins", "admins"], cmd_admins))
     # Keyword blacklist
-    app.add_handler(CommandHandler("addblacklist", cmd_addblacklist))
-    app.add_handler(CommandHandler("delblacklist", cmd_delblacklist))
-    app.add_handler(CommandHandler("bwords", cmd_bwords))
+    app.add_handler(CommandHandler(["add_word", "addblacklist"], cmd_addblacklist))
+    app.add_handler(CommandHandler(["delete_word", "delblacklist"], cmd_delblacklist))
+    app.add_handler(CommandHandler(["list_words", "bwords"], cmd_bwords))
     app.add_handler(CommandHandler("preset", cmd_preset))
-    app.add_handler(CommandHandler("unpreset", cmd_unpreset))
+    app.add_handler(CommandHandler(["delete_preset", "unpreset"], cmd_unpreset))
     # Domain whitelist
-    app.add_handler(CommandHandler("addlink", cmd_addlink))
-    app.add_handler(CommandHandler("dellink", cmd_dellink))
-    app.add_handler(CommandHandler("links", cmd_links))
+    app.add_handler(CommandHandler(["add_link", "addlink"], cmd_addlink))
+    app.add_handler(CommandHandler(["delete_link", "dellink"], cmd_dellink))
+    app.add_handler(CommandHandler(["list_links", "links"], cmd_links))
     # @username được phép
-    app.add_handler(CommandHandler("addat", cmd_addat))
-    app.add_handler(CommandHandler("delat", cmd_delat))
-    app.add_handler(CommandHandler("ats", cmd_ats))
+    app.add_handler(CommandHandler(["add_username", "addat"], cmd_addat))
+    app.add_handler(CommandHandler(["delete_username", "delat"], cmd_delat))
+    app.add_handler(CommandHandler(["list_usernames", "ats"], cmd_ats))
     # Chặn cứng người/kênh
-    app.add_handler(CommandHandler("blockuser", cmd_blockuser))
-    app.add_handler(CommandHandler("unblockuser", cmd_unblockuser))
-    app.add_handler(CommandHandler("blocked", cmd_blocked))
+    app.add_handler(CommandHandler(["block_user", "blockuser"], cmd_blockuser))
+    app.add_handler(CommandHandler(["unblock_user", "unblockuser"], cmd_unblockuser))
+    app.add_handler(CommandHandler(["list_blocked", "blocked"], cmd_blocked))
     # Bang dieu khien + bat/tat
     app.add_handler(CommandHandler("panel", cmd_panel))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("action", cmd_action))
-    app.add_handler(CommandHandler("lastbans", cmd_lastbans))
+    app.add_handler(CommandHandler(["last_bans", "lastbans"], cmd_lastbans))
     app.add_handler(CommandHandler("undo", cmd_undo))
     app.add_handler(CallbackQueryHandler(on_panel_button, pattern=r"^p:"))
     app.add_handler(CommandHandler("services", cmd_services))
     app.add_handler(CommandHandler("anon", cmd_anon))
-    app.add_handler(CommandHandler("addphone", cmd_addphone))
-    app.add_handler(CommandHandler("delphone", cmd_delphone))
-    app.add_handler(CommandHandler("phones", cmd_phones))
+    app.add_handler(CommandHandler(["add_phone", "addphone"], cmd_addphone))
+    app.add_handler(CommandHandler(["delete_phone", "delphone"], cmd_delphone))
+    app.add_handler(CommandHandler(["list_phones", "phones"], cmd_phones))
     app.add_handler(CommandHandler("web", cmd_web))
-    app.add_handler(CommandHandler("quetlai", cmd_quetlai))
-    app.add_handler(CommandHandler("dungquet", cmd_dungquet))
-    app.add_handler(CommandHandler("setgroup", cmd_setgroup))
+    app.add_handler(CommandHandler(["purge_all", "quetlai"], cmd_quetlai))
+    app.add_handler(CommandHandler(["stop_purge", "dungquet"], cmd_dungquet))
+    app.add_handler(CommandHandler(["set_group", "setgroup"], cmd_setgroup))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("start", cmd_start))
 
