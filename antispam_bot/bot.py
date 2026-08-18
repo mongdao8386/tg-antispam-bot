@@ -48,7 +48,13 @@ from telegram.ext import (
 from . import control, ocr, presets, qrscan, web
 from .config import VALID_ACTIONS, Config
 from .detector import MessageFacts, Verdict, analyse
-from .normalize import looks_like_question, normalize, squeeze
+from .normalize import (
+    looks_like_question,
+    normalize,
+    normalize_keep_accents,
+    squeeze,
+    squeeze_keep_accents,
+)
 from .storage import GLOBAL, Storage
 
 log = logging.getLogger("antispam")
@@ -124,6 +130,38 @@ async def _bot_admin_ids(context: ContextTypes.DEFAULT_TYPE) -> set[int]:
     return ids
 
 
+def _dang_tu_cam(tu: str) -> tuple[str, str, str, str]:
+    """Bốn dạng của một từ cấm, dùng để so khớp.
+
+    (có dấu, bỏ dấu, dồn chữ có dấu, dồn chữ bỏ dấu)
+    """
+    return (
+        normalize_keep_accents(tu), normalize(tu),
+        squeeze_keep_accents(tu), squeeze(tu),
+    )
+
+
+def _khop_tu_cam(rules_keywords, chu: str) -> list[str]:
+    """Những từ cấm xuất hiện trong đoạn chữ này.
+
+    Điểm mấu chốt: so trên chuỗi CÒN DẤU. Trước đây bỏ dấu cả hai vế nên
+    "lựa đào" và "lừa đảo" thành cùng một chuỗi, câu "giờ này là lên lựa đào
+    nè anh em" bị ban oan.
+
+    Cả bốn dạng đều so với chuỗi còn dấu của tin nhắn:
+        "lừa đảo"  khớp "lừa đảo", "LỪA ĐẢO", "l.ừ.a đ.ả.o"
+        "lua dao"  khớp khi người ta gõ không dấu, và cả "lu@ d@o"
+        "lựa đào"  KHÔNG khớp dạng nào - dấu của nó khác hẳn
+    """
+    co_dau = normalize_keep_accents(chu)
+    don_co_dau = squeeze_keep_accents(chu)
+    return [
+        raw for raw, k_cd, k_kd, k_dcd, k_dkd in rules_keywords
+        if k_cd in co_dau or k_kd in co_dau
+        or k_dcd in don_co_dau or k_dkd in don_co_dau
+    ]
+
+
 class ChatRules:
     """Toàn bộ danh sách của một nhóm, gom sẵn để không phải hỏi DB mỗi tin.
 
@@ -174,7 +212,11 @@ async def _chat_rules(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> ChatR
     })
     rules = ChatRules(
         cfg=eff,
-        keywords=[(k, normalize(k), squeeze(k)) for k in await db.get_keywords_effective(chat_id)],
+        # Mỗi từ cấm giữ 4 dạng để so: có dấu, không dấu, và bản dồn chữ của
+        # cả hai. Xem _khop_tu_cam() để biết vì sao cần đủ bốn.
+        keywords=[
+            (k, *_dang_tu_cam(k)) for k in await db.get_keywords_effective(chat_id)
+        ],
         seeding=set(await db.get_fwd_whitelist(chat_id)) | set(await db.get_fwd_whitelist(GLOBAL)),
         blocked=set(await db.get_blacklist(chat_id)) | set(await db.get_blacklist(GLOBAL)),
         at_ok=ats,
@@ -857,13 +899,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not force_punish and not benign_question and rules.keywords:
         combined = " ".join(filter(None, [msg.text, msg.caption, *qr_payloads, ocr_text]))
         if combined:
-            norm_combined = normalize(combined)
-            # squeeze bắt cả kiểu viết cách chữ để né lọc: "l ừ a  đ ả o"
-            sq_combined = squeeze(combined)
-            matched = [
-                raw for raw, kn, ks in rules.keywords
-                if kn in norm_combined or ks in sq_combined
-            ]
+            matched = _khop_tu_cam(rules.keywords, combined)
             if matched:
                 force_punish = True
                 force_reason = f"từ bị cấm: {', '.join(sorted(matched)[:3])}"
@@ -1195,11 +1231,9 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             qr_note += "\nOCR: không đọc được chữ nào trong ảnh."
     # Từ cấm cũng phải được phản ánh, nếu không /check sẽ báo "sạch" cho tin sẽ bị ban.
     kw_list = await db.get_keywords_effective(target.chat_id)
-    combined = " ".join(filter(None, [target.text, target.caption, *qr_payloads]))
-    matched_kw = [
-        kw for kw in kw_list
-        if normalize(kw) in normalize(combined) or squeeze(kw) in squeeze(combined)
-    ]
+    combined = " ".join(filter(None, [target.text, target.caption, *qr_payloads, ocr_text]))
+    # Dùng chung hàm với scan() để /check luôn cho cùng kết quả với lúc chạy thật.
+    matched_kw = _khop_tu_cam([(k, *_dang_tu_cam(k)) for k in kw_list], combined)
 
     list_note = ""
     if matched_kw:

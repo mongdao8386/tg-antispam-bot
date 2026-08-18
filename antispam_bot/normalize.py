@@ -123,3 +123,32 @@ def looks_like_question(text: str) -> bool:
     if "?" in text:
         return True
     return bool(_QUESTION_RE.search(normalize(text)))
+
+
+# Như NON_ALNUM_RE nhưng giữ lại chữ có dấu tiếng Việt.
+NON_ALNUM_VN_RE = re.compile(r"[^0-9a-zà-ỹ]+")
+
+
+def normalize_keep_accents(text: str) -> str:
+    """Chuẩn hoá NHƯNG GIỮ DẤU tiếng Việt.
+
+    Vẫn chống được ký tự vô hình, chữ giả Latin (Cyrillic/Hy Lạp) và leetspeak
+    - chỉ khác normalize() ở chỗ không bỏ dấu.
+
+    Cần vì bỏ dấu gây đụng độ chết người: "lựa đào" và "lừa đảo" đều thành
+    "lua dao", nên câu nói chuyện bình thường bị coi là tố cáo lừa đảo.
+    """
+    text = unicodedata.normalize("NFKC", text)
+    text = INVISIBLE_RE.sub("", text)
+    text = text.lower()
+    text = text.translate(HOMOGLYPHS).translate(LEET)
+    text = NON_ALNUM_VN_RE.sub(" ", text)
+    return REPEAT_RE.sub(r"\1\1", text).strip()
+
+
+def squeeze_keep_accents(text: str) -> str:
+    """Như normalize_keep_accents() nhưng bỏ luôn khoảng trắng.
+
+    Bắt kiểu chèn khoảng trắng để né lọc: "l ừ a  đ ả o" -> "lừađảo".
+    """
+    return normalize_keep_accents(text).replace(" ", "")
