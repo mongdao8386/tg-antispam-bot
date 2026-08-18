@@ -2372,6 +2372,35 @@ async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except TelegramError:
             pass
         return
+    elif data.startswith("seedall:"):
+        try:
+            toi_thieu = int(data.split(":", 1)[1])
+        except ValueError:
+            await q.answer("Ngưỡng không hợp lệ", show_alert=True)
+            return
+        nhom = await _managed_groups(context)
+        da_co = await db.get_fwd_whitelist(GLOBAL)
+        bot_admins = await _bot_admin_ids(context)
+        await q.answer("Đang thêm...")
+        them: list[str] = []
+        for uid, ten, tag, _ts in await db.get_starters():
+            if uid in cfg.owner_ids or uid in bot_admins or uid in da_co:
+                continue
+            if await _dem_nhom_chung(context, uid, nhom) >= toi_thieu:
+                await db.add_fwd_whitelist(GLOBAL, uid)
+                them.append(f"• {html.escape(ten or str(uid))} (<code>{uid}</code>)")
+        _invalidate_rules(context)
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+            await q.message.reply_html(
+                f"✅ Đã thêm <b>{len(them)}</b> acc seeding cho mọi nhóm:\n"
+                + "\n".join(them[:30])
+                + (f"\n<i>...và {len(them) - 30} acc nữa</i>" if len(them) > 30 else "")
+                if them else "Không có acc nào đủ điều kiện."
+            )
+        except TelegramError:
+            pass
+        return
     elif data.startswith("seed:") or data.startswith("blk:"):
         # Nút trên tin chuyển tiếp: thêm thẳng vào danh sách, phạm vi GLOBAL
         # (mọi nhóm) vì bấm từ chat riêng.
@@ -2720,6 +2749,113 @@ async def cmd_dungquet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _quiet_reply(update, context, "Đang dừng... đợi lệnh hiện tại xong.")
 
 
+# ---------------------------------------------------------------------------
+# Nhận diện acc seeding — /scan_accounts
+# ---------------------------------------------------------------------------
+
+CO_TRONG_NHOM = frozenset({
+    ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR,
+    ChatMemberStatus.OWNER, ChatMemberStatus.RESTRICTED,
+})
+
+
+async def _dem_nhom_chung(
+    context: ContextTypes.DEFAULT_TYPE, uid: int, nhom: list[int]
+) -> int:
+    """Người này đang ở bao nhiêu nhóm trong số nhóm bot quản lý."""
+    gioi_han = asyncio.Semaphore(6)
+    dem = 0
+
+    async def hoi(gid: int) -> None:
+        nonlocal dem
+        async with gioi_han:
+            try:
+                tv = await context.bot.get_chat_member(gid, uid)
+                if tv.status in CO_TRONG_NHOM:
+                    dem += 1
+            except TelegramError:
+                pass
+
+    await asyncio.gather(*(hoi(g) for g in nhom))
+    return dem
+
+
+async def cmd_scan_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/scan_accounts [số nhóm tối thiểu] — tìm acc seeding của mình.
+
+    Cách hoạt động: mọi acc đã bấm Start với bot đều được ghi lại. Kẻ spam
+    không bao giờ làm việc đó, nên danh sách này gần như chỉ gồm người của
+    mình. Đếm thêm số nhóm chung để chắc chắn: acc có mặt ở gần hết các nhóm
+    thì đúng là acc seeding.
+    """
+    if not await _require_admin(update, context):
+        return
+    db = _db(context)
+    cfg = _cfg(context)
+    nhom = await _managed_groups(context)
+    if not nhom:
+        await _quiet_reply(update, context, "Chưa đăng ký nhóm nào. Dùng /set_group")
+        return
+
+    starters = await db.get_starters()
+    # Bỏ owner và bot admin - họ đã có quyền, không cần vào danh sách seeding.
+    bot_admins = await _bot_admin_ids(context)
+    ung_vien = [s for s in starters if s[0] not in cfg.owner_ids and s[0] not in bot_admins]
+    if not ung_vien:
+        await _quiet_reply(
+            update, context,
+            "Chưa có acc nào bấm Start với bot.\n\n"
+            "Bảo từng acc seeding mở chat riêng với bot rồi bấm <b>Start</b> "
+            "(chỉ một lần). Sau đó gõ lại lệnh này là thấy hết.",
+        )
+        return
+
+    toi_thieu = len(nhom) * 2 // 3          # mặc định: ở ít nhất 2/3 số nhóm
+    if context.args:
+        try:
+            toi_thieu = max(1, int(context.args[0]))
+        except ValueError:
+            pass
+
+    cho = await update.effective_message.reply_html(
+        f"🔎 Đang kiểm tra <b>{len(ung_vien)}</b> acc trên <b>{len(nhom)}</b> nhóm..."
+    )
+
+    da_co = await db.get_fwd_whitelist(GLOBAL)
+    ket: list[tuple[int, str, str, int]] = []
+    for uid, ten, tag, _ts in ung_vien:
+        ket.append((uid, ten, tag, await _dem_nhom_chung(context, uid, nhom)))
+    ket.sort(key=lambda x: -x[3])
+
+    dat = [k for k in ket if k[3] >= toi_thieu and k[0] not in da_co]
+    dong = []
+    for uid, ten, tag, so in ket:
+        dau = "✅" if uid in da_co else ("⭐" if so >= toi_thieu else "▫️")
+        ten_hien = html.escape(ten or str(uid))
+        dong.append(f"{dau} {ten_hien}{f' @{tag}' if tag else ''} — <b>{so}</b>/{len(nhom)} nhóm")
+
+    nut = None
+    if dat:
+        nut = InlineKeyboardMarkup([[InlineKeyboardButton(
+            f"➕ Thêm {len(dat)} acc (≥{toi_thieu} nhóm) làm seeding",
+            callback_data=f"p:seedall:{toi_thieu}",
+        )]])
+
+    try:
+        await cho.edit_text(
+            f"🔎 <b>Acc đã bấm Start</b> ({len(ket)})\n"
+            f"Ngưỡng: từ <b>{toi_thieu}</b>/{len(nhom)} nhóm trở lên\n\n"
+            + "\n".join(dong[:40])
+            + (f"\n\n<i>...còn {len(dong) - 40} acc nữa</i>" if len(dong) > 40 else "")
+            + "\n\n✅ đã là seeding · ⭐ đủ điều kiện · ▫️ ít nhóm\n"
+            + ("Bấm nút dưới để thêm hàng loạt." if dat else "Không có acc mới nào đủ điều kiện.")
+            + f"\n\nĐổi ngưỡng: <code>/scan_accounts 5</code>",
+            parse_mode="HTML", reply_markup=nut,
+        )
+    except TelegramError as exc:
+        log.warning("Không hiện được kết quả quét: %s", exc)
+
+
 async def cmd_setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/set_group — quản lý danh sách nhóm (chỉ owner, trong chat riêng).
 
@@ -2855,6 +2991,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     uid = user.id if user else "?"
 
+    # Ghi lại ai đã bấm Start. Kẻ spam không bao giờ bấm Start với bot chống
+    # spam, nên danh sách này gần như chỉ gồm người của mình - /scan_accounts
+    # dựa vào đó để nhận ra acc seeding mà không phải copy ID từng cái.
+    if user:
+        await _db(context).add_starter(user.id, user.full_name or "", user.username or "")
+
     # Owner / bot admin → hiện bảng điều khiển
     db = _db(context)
     is_owner = user is not None and user.id in _cfg(context).owner_ids
@@ -2963,6 +3105,7 @@ _OWNER_CMDS = [
     BotCommand("delete_word", "➖ Bỏ từ cấm"),
     BotCommand("list_words", "📄 Danh sách từ cấm"),
     # Acc seeding
+    BotCommand("scan_accounts", "🔎 Tìm acc seeding của mình"),
     BotCommand("add_user", "➕ Thêm acc seeding"),
     BotCommand("delete_user", "➖ Xoá acc seeding"),
     BotCommand("list_users", "📄 Danh sách acc seeding"),
@@ -3003,6 +3146,7 @@ _GROUP_ADMIN_CMDS = [
     BotCommand("status", "Trạng thái và thống kê"),
     BotCommand("preset", "Nạp bộ từ cấm dựng sẵn"),
     BotCommand("add_word", "Cấm từ ở nhóm này"),
+    BotCommand("scan_accounts", "Tìm acc seeding của mình"),
     BotCommand("add_user", "Thêm acc seeding (reply hoặc id)"),
     BotCommand("add_link", "Cho phép domain ở nhóm này"),
     BotCommand("add_username", "Cho phép nhắc @username"),
@@ -3423,6 +3567,7 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler("web", cmd_web))
     app.add_handler(CommandHandler(["purge_all", "quetlai"], cmd_quetlai))
     app.add_handler(CommandHandler(["stop_purge", "dungquet"], cmd_dungquet))
+    app.add_handler(CommandHandler("scan_accounts", cmd_scan_accounts))
     app.add_handler(CommandHandler(["set_group", "setgroup"], cmd_setgroup))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("start", cmd_start))

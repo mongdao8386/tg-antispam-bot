@@ -62,6 +62,15 @@ CREATE TABLE IF NOT EXISTS phone_whitelist (
     PRIMARY KEY (chat_id, phone)
 );
 
+-- Ai đã bấm Start với bot trong chat riêng. Dùng để nhận diện acc seeding:
+-- kẻ spam không bao giờ bấm Start với bot chống spam.
+CREATE TABLE IF NOT EXISTS starters (
+    user_id  INTEGER PRIMARY KEY,
+    name     TEXT    NOT NULL DEFAULT '',
+    username TEXT    NOT NULL DEFAULT '',
+    ts       INTEGER NOT NULL
+);
+
 -- Cài đặt chung của bot (key-value)
 CREATE TABLE IF NOT EXISTS bot_settings (
     key   TEXT PRIMARY KEY,
@@ -523,6 +532,37 @@ class Storage:
 
     async def count_phones(self, chat_id: int) -> int:
         return await self._run(self._count_phones, chat_id)
+
+    # -- người đã bấm Start -----------------------------------------------
+
+    def _add_starter(self, user_id: int, name: str, username: str) -> None:
+        self._conn.execute(
+            "INSERT INTO starters (user_id, name, username, ts) VALUES (?,?,?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET name=excluded.name, username=excluded.username",
+            (user_id, name[:80], username[:40], int(time.time())),
+        )
+        self._conn.commit()
+
+    async def add_starter(self, user_id: int, name: str = "", username: str = "") -> None:
+        await self._run(self._add_starter, user_id, name, username)
+
+    def _get_starters(self) -> list[tuple[int, str, str, int]]:
+        cur = self._conn.execute(
+            "SELECT user_id, name, username, ts FROM starters ORDER BY ts DESC"
+        )
+        return cur.fetchall()
+
+    async def get_starters(self) -> list[tuple[int, str, str, int]]:
+        """Danh sách (id, tên, @username, lúc bấm Start), mới nhất trước."""
+        return await self._run(self._get_starters)
+
+    def _remove_starter(self, user_id: int) -> int:
+        cur = self._conn.execute("DELETE FROM starters WHERE user_id=?", (user_id,))
+        self._conn.commit()
+        return cur.rowcount
+
+    async def remove_starter(self, user_id: int) -> int:
+        return await self._run(self._remove_starter, user_id)
 
     # -- cài đặt bot (key-value) ------------------------------------------
 
