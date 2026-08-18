@@ -155,10 +155,11 @@ PHONE_RE = re.compile(
 # Hoá đơn / biên lai chuyển khoản. Ảnh chụp bill là chiêu khoe "đã trả tiền"
 # để dụ nạn nhân tin tưởng.
 BILL_HINT_RE = re.compile(
-    r"(?i)chuy[eể]n\s*kho[aả]n|giao\s*d[iị]ch\s*th[aà]nh\s*c[oô]ng"
-    r"|s[oố]\s*ti[eề]n|bi[eê]n\s*lai|h[oó]a\s*[dđ][oơ]n|thanh\s*to[aá]n"
+    r"(?i)chuy[eể]n\s*kho[aả]n|chuy[eể]n\s*ti[eề]n|nh[aậ]n\s*ti[eề]n"
+    r"|th[aà]nh\s*c[oô]ng|giao\s*d[iị]ch|s[oố]\s*ti[eề]n|bi[eê]n\s*lai"
+    r"|h[oó]a\s*[dđ][oơ]n|thanh\s*to[aá]n|ng[uư][oờ]i\s*nh[aậ]n"
     r"|transfer|successful|receipt|s[oố]\s*d[uư]|t[iị]ch\s*l[uũ]y"
-    r"|m[aã]\s*giao\s*d[iị]ch|n[oộ]i\s*dung\s*chuy[eể]n"
+    r"|n[oộ]i\s*dung\s*chuy[eể]n|s[oố]\s*d[uư]\s*kh[aả]\s*d[uụ]ng"
 )
 # Số tiền kiểu Việt Nam: 108.000 / 108,000 / 1.500.000đ / 500000 VND
 AMOUNT_RE = re.compile(
