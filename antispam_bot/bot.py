@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import os
 import re
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -62,6 +64,10 @@ IMAGE_READ_TIMEOUT = 20.0
 # tấm ảnh không tải nổi mà cứ thử mãi sẽ treo toàn bộ nhóm khác. Quét được một
 # tấm ảnh không đáng để bot đứng hình lâu hơn chừng này.
 IMAGE_TOTAL_BUDGET = 30.0
+# Cỡ ảnh tối thiểu cần tải. Telegram gửi kèm nhiều cỡ; lấy bản nhỏ nhất mà vẫn
+# đủ nét sẽ nhanh hơn hẳn trên mạng yếu, trong khi OCR/QR không kém đi vì
+# 1280px đã thừa cho chữ quảng cáo và mã QR cỡ thường.
+ANH_CAN_IT_NHAT = 1280
 # Cắt đuôi "(+3)" trong lý do khi gửi log - người đọc không cần con số
 _RE_DIEM = re.compile(r"\s*\(\+\d+\)\s*$")
 RULES_CACHE_TTL = 60   # giây - lệnh admin xoá cache ngay nên đây chỉ là lưới an toàn
@@ -520,13 +526,20 @@ def _image_ref(msg: Message, max_bytes: int) -> tuple[str, str] | None:
     dùng làm khoá nhớ kết quả OCR.
     """
     if msg.photo:
-        # photo là danh sách nhiều kích cỡ; lấy bản lớn nhất còn nằm dưới hạn mức
-        # vì QR càng nhiều pixel càng dễ giải.
+        # Telegram gửi kèm nhiều cỡ (thường 90 / 320 / 800 / 1280px).
+        # Trước đây luôn lấy bản TO NHẤT, nhưng OCR đằng nào cũng thu về
+        # OCR_MAX_SIDE nên phần dư chỉ tốn thời gian tải - đúng chỗ nghẽn trên
+        # mạng chậm. Giờ lấy bản NHỎ NHẤT mà vẫn đủ nét, chỉ dùng bản to hơn
+        # khi không có cỡ nào đạt.
         usable = [p for p in msg.photo if (p.file_size or 0) <= max_bytes]
-        if usable:
-            best = max(usable, key=lambda p: (p.width or 0) * (p.height or 0))
-            return best.file_id, best.file_unique_id
-        return None
+        if not usable:
+            return None
+        du_net = [p for p in usable if max(p.width or 0, p.height or 0) >= ANH_CAN_IT_NHAT]
+        best = (
+            min(du_net, key=lambda p: (p.width or 0) * (p.height or 0)) if du_net
+            else max(usable, key=lambda p: (p.width or 0) * (p.height or 0))
+        )
+        return best.file_id, best.file_unique_id
 
     doc = msg.document
     if doc and (doc.mime_type or "").startswith("image/") and (doc.file_size or 0) <= max_bytes:
@@ -2735,6 +2748,73 @@ async def _setup_commands(app: Application) -> None:
         )
 
 
+def _bat_mau() -> bool:
+    """Bật màu ANSI nếu terminal hỗ trợ. Không thì trả về False để in trơn."""
+    if not sys.stdout.isatty():
+        return False       # đang ghi ra file thì đừng chèn mã màu
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        che_do = ctypes.c_uint()
+        if not k.GetConsoleMode(k.GetStdHandle(-11), ctypes.byref(che_do)):
+            return False
+        # 0x0004 = ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        return bool(k.SetConsoleMode(k.GetStdHandle(-11), che_do.value | 0x0004))
+    except Exception:  # noqa: BLE001 - console lạ thì cứ in trơn
+        return False
+
+
+_CO_MAU = _bat_mau()
+XANH = "\033[92m" if _CO_MAU else ""
+XAM = "\033[90m" if _CO_MAU else ""
+DO = "\033[91m" if _CO_MAU else ""
+HET_MAU = "\033[0m" if _CO_MAU else ""
+
+
+async def _kiem_tra_nhom(app: Application, ids: list[str]) -> None:
+    """Kiểm tra từng nhóm, hiện thanh tiến trình chạy dần rồi tổng kết.
+
+    Hỏi song song cho nhanh, nhưng thanh vẫn nhích đều theo số nhóm đã xong -
+    thấy được tiến độ thật chứ không phải đứng im rồi nhảy phát một.
+    """
+    tong = len(ids)
+    xong = 0
+    ten_nhom: list[str] = []
+    loi: list[str] = []
+
+    def ve(nhan: str = "") -> None:
+        o = 28 * xong // tong
+        thanh = f"{XANH}{'█' * o}{XAM}{'░' * (28 - o)}{HET_MAU}"
+        print(f"\r  [{thanh}] {xong * 100 // tong:3d}%  {xong}/{tong} nhóm{nhan}   ",
+              end="", flush=True)
+
+    gioi_han = asyncio.Semaphore(8)
+
+    async def hoi(gid: str) -> None:
+        nonlocal xong
+        async with gioi_han:
+            try:
+                chat = await app.bot.get_chat(int(gid))
+                ten_nhom.append(chat.title or gid)
+            except (TelegramError, ValueError) as exc:
+                loi.append(f"{gid}: {exc}")
+            xong += 1
+            ve()
+
+    ve()
+    await asyncio.gather(*(hoi(g) for g in ids))
+    ve(f"  {XANH}✓{HET_MAU}" if not loi else f"  {DO}✗{HET_MAU}")
+    print()
+
+    # Liệt kê tên nhóm sau khi thanh chạy xong, mỗi dòng một nhóm.
+    for ten in sorted(ten_nhom):
+        log.info("   %s%s ✓%s", XANH, ten, HET_MAU)
+    for l in loi:
+        log.warning("   %s%s ✗%s", DO, l, HET_MAU)
+
+
 async def _post_init(app: Application) -> None:
     """Tóm tắt tình trạng lúc khởi động - mỗi thứ đúng một dòng.
 
@@ -2776,12 +2856,8 @@ async def _post_init(app: Application) -> None:
     ids = [p.strip() for p in (raw or "").split(",") if p.strip()]
     if not ids:
         log.info("Nhóm: chưa đăng ký nhóm nào — dùng /setgroup")
-    for gid in ids:
-        try:
-            chat = await app.bot.get_chat(int(gid))
-            log.info("%s ✓", chat.title or gid)
-        except (TelegramError, ValueError) as exc:
-            log.warning("%s ✗ %s", gid, exc)
+    else:
+        await _kiem_tra_nhom(app, ids)
 
     # Chỉ cái này mới đáng phá vỡ sự gọn gàng: bot mù thì mọi thứ khác vô nghĩa.
     if not doc_tin:
