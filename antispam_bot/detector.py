@@ -494,12 +494,20 @@ def analyse(facts: MessageFacts, cfg: Config) -> Verdict:
     # không QR không link không chữ, nên chỉ soi text là mù hoàn toàn.
     if CRYPTO_RE.search(scannable):
         v.add(v.threshold, "địa chỉ ví crypto")
-    if BANK_RE.search(scannable):
-        v.add(v.threshold, "số tài khoản ngân hàng")
-    elif BANK_NEAR_RE.search(scannable):
-        # Không có chữ "STK" nhưng có tên ngân hàng cạnh một dãy số dài -
-        # đúng kiểu ảnh cắt chỉ để lại thông tin chuyển khoản.
-        v.add(v.threshold, "tên ngân hàng kèm số tài khoản")
+
+    # Ảnh có phải là thông báo/biên lai ngân hàng thật không. Loại này LUÔN có
+    # tên ngân hàng cạnh số tài khoản, nên nếu cứ thấy cặp đó là chặn thì
+    # người chụp màn hình báo biến động số dư cũng bị vạ lây. Với loại này,
+    # để mục "ảnh bill" bên dưới quyết theo SỐ TIỀN - đúng ý "trên 108 nghìn".
+    la_thong_bao_nh = bool(facts.ocr_text and BILL_HINT_RE.search(facts.ocr_text))
+
+    if not la_thong_bao_nh:
+        if BANK_RE.search(scannable):
+            v.add(v.threshold, "số tài khoản ngân hàng")
+        elif BANK_NEAR_RE.search(scannable):
+            # Không có chữ "STK" nhưng có tên ngân hàng cạnh một dãy số dài -
+            # đúng kiểu ảnh cắt chỉ để lại thông tin chuyển khoản.
+            v.add(v.threshold, "tên ngân hàng kèm số tài khoản")
     # Số điện thoại: quét cả chữ trong ảnh, vì tờ rơi quảng cáo luôn in số
     # liên hệ lên ảnh chứ không gõ vào tin nhắn.
     phones = {
