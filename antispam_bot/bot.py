@@ -1292,35 +1292,68 @@ async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _quiet_reply(update, context, f"Đã gỡ chặn <code>{uid}</code> ở {ok} nhóm{tail}.")
 
 
-def _parse_ids(update: Update, context: ContextTypes.DEFAULT_TYPE, kenh: bool = False) -> list[int]:
-    """Nhiều ID một lúc: "/add_user 111, 222 333" đều hiểu được.
+async def _parse_ids(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, kenh: bool = False
+) -> tuple[list[int], list[str]]:
+    """Đọc danh sách ID từ lệnh. Trả về (ID lấy được, những phần không hiểu).
 
-    Không truyền ID nào thì lấy từ tin nhắn được reply.
-    kenh=True thì nhận cả ID kênh (sender_chat), dùng cho lệnh chặn.
+    Nhận bốn cách, trộn lẫn thoải mái:
+        /add_user 111, 222            - ID trực tiếp
+        /add_user @acc1, @acc2        - theo @username, bot tự tra ra ID
+        /add_user            (reply)  - lấy từ tin nhắn được reply
+        /add_user            (forward)- lấy từ người gốc của tin chuyển tiếp
+
+    Cách @username đỡ hẳn việc bắt từng acc bấm Start rồi gõ /id rồi copy.
     """
     raw = " ".join(context.args or []).replace(",", " ").replace(";", " ")
     ra: list[int] = []
+    hong: list[str] = []
+
     for phan in raw.split():
-        try:
-            so = int(phan)
-        except ValueError:
+        if phan.lstrip("@").lstrip("-").isdigit():
+            so = int(phan.lstrip("@"))
+            if so not in ra:
+                ra.append(so)
             continue
-        if so not in ra:
-            ra.append(so)
-    if ra:
-        return ra
+        # Không phải số -> coi là @username, nhờ Telegram tra hộ.
+        ten = phan.lstrip("@")
+        try:
+            chat = await context.bot.get_chat(f"@{ten}")
+            if chat.id not in ra:
+                ra.append(chat.id)
+        except TelegramError:
+            hong.append(phan)
+
+    if ra or hong:
+        return ra, hong
 
     target = update.effective_message.reply_to_message
     if target:
         if kenh and target.sender_chat:
-            return [target.sender_chat.id]
+            return [target.sender_chat.id], []
         if target.from_user:
-            return [target.from_user.id]
-    return []
+            return [target.from_user.id], []
+        # Tin được reply lại là tin chuyển tiếp: lấy người gốc.
+        goc = getattr(target, "forward_origin", None)
+        nguoi = getattr(goc, "sender_user", None) if goc else None
+        if nguoi:
+            return [nguoi.id], []
+    return [], []
 
 
 def _danh_sach(ids: list[int]) -> str:
     return "\n".join(f"• <code>{i}</code>" for i in ids)
+
+
+def _bao_hong(hong: list[str]) -> str:
+    """Phần đuôi liệt kê những @username tra không ra."""
+    if not hong:
+        return ""
+    return (
+        f"\n\n⚠️ Không tra được: {', '.join(f'<code>{html.escape(h)}</code>' for h in hong)}\n"
+        "@username phải công khai và viết đúng. Nick không đặt @ thì reply vào "
+        "tin của họ, hoặc chuyển tiếp tin đó cho bot."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1333,7 +1366,7 @@ async def cmd_blockuser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not await _require_admin(update, context):
         return
     scope = _write_scope(update)
-    ids = _parse_ids(update, context, kenh=True)
+    ids, hong = await _parse_ids(update, context, kenh=True)
     if not ids:
         await _quiet_reply(
             update, context,
@@ -1357,7 +1390,7 @@ async def cmd_unblockuser(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await _require_admin(update, context):
         return
     scope = _write_scope(update)
-    ids = _parse_ids(update, context, kenh=True)
+    ids, hong = await _parse_ids(update, context, kenh=True)
     if not ids:
         await _quiet_reply(update, context, "Dùng: <code>/unblock_user 111, 222</code> hoặc reply.")
         return
@@ -1422,13 +1455,16 @@ async def cmd_adduser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not await _require_admin(update, context):
         return
     scope = _write_scope(update)
-    ids = _parse_ids(update, context)
+    ids, hong = await _parse_ids(update, context)
     if not ids:
         await _quiet_reply(
             update, context,
-            "Reply vào tin của acc đó, hoặc:\n"
-            "<code>/add_user 111222333</code>\n"
-            "<code>/add_user 111, 222, 333</code>",
+            "Ba cách, chọn cách nào cũng được:\n\n"
+            "<b>1.</b> <code>/add_user @acc1, @acc2</code>  ← nhanh nhất\n"
+            "<b>2.</b> Reply vào tin của acc đó rồi gõ <code>/add_user</code>\n"
+            "<b>3.</b> Chuyển tiếp tin của acc đó cho bot (chat riêng)\n\n"
+            "Có sẵn ID thì: <code>/add_user 111, 222</code>"
+            + _bao_hong(hong),
         )
         return
     db = _db(context)
@@ -1436,7 +1472,8 @@ async def cmd_adduser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await db.add_fwd_whitelist(scope, uid)
     await _quiet_reply(
         update, context,
-        f"✅ Thêm <b>{len(ids)}</b> acc seeding ở {_scope_label(scope)}:\n{_danh_sach(ids)}",
+        f"✅ Thêm <b>{len(ids)}</b> acc seeding ở {_scope_label(scope)}:\n{_danh_sach(ids)}"
+        + _bao_hong(hong),
     )
 
 
@@ -1445,7 +1482,7 @@ async def cmd_deluser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not await _require_admin(update, context):
         return
     scope = _write_scope(update)
-    ids = _parse_ids(update, context)
+    ids, hong = await _parse_ids(update, context)
     if not ids:
         await _quiet_reply(update, context, "Dùng: <code>/delete_user 111, 222</code> hoặc reply.")
         return
@@ -1489,7 +1526,7 @@ async def cmd_addadm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         except TelegramError:
             pass
         return
-    ids = _parse_ids(update, context)
+    ids, hong = await _parse_ids(update, context)
     if not ids:
         await _quiet_reply(
             update, context,
@@ -1551,7 +1588,7 @@ async def cmd_deladm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         except TelegramError:
             pass
         return
-    ids = _parse_ids(update, context)
+    ids, hong = await _parse_ids(update, context)
     if not ids:
         await _quiet_reply(update, context, "Dùng: <code>/delete_admin 111, 222</code> hoặc reply.")
         return
@@ -2335,6 +2372,29 @@ async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except TelegramError:
             pass
         return
+    elif data.startswith("seed:") or data.startswith("blk:"):
+        # Nút trên tin chuyển tiếp: thêm thẳng vào danh sách, phạm vi GLOBAL
+        # (mọi nhóm) vì bấm từ chat riêng.
+        loai, uid = data.split(":", 1)
+        try:
+            uid = int(uid)
+        except ValueError:
+            await q.answer("ID không hợp lệ", show_alert=True)
+            return
+        if loai == "seed":
+            await db.add_fwd_whitelist(GLOBAL, uid)
+            xong = "Đã thêm làm acc seeding (mọi nhóm)"
+        else:
+            await db.add_blacklist(GLOBAL, uid)
+            xong = "Đã chặn cứng ở mọi nhóm"
+        _invalidate_rules(context)
+        await q.answer(xong)
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+            await q.message.reply_html(f"✅ {xong}: <code>{uid}</code>")
+        except TelegramError:
+            pass
+        return
     elif data == "congtac":
         co = await control.all_flags(db, cfg)
         await q.answer()
@@ -2737,6 +2797,54 @@ async def cmd_setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await db.set_setting("home_group", ",".join(str(i) for i in ids))
     listed = "\n".join(f"• <code>{i}</code>" for i in ids)
     await _quiet_reply(update, context, f"✅ Đang quản lý {len(ids)} nhóm:\n{listed}")
+
+
+async def on_forward_private(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Chuyển tiếp tin của ai đó cho bot (chat riêng) -> hiện ID kèm nút thêm.
+
+    Đây là cách nhanh nhất để lấy ID acc seeding: khỏi bắt từng acc bấm Start
+    rồi gõ /id rồi copy số. Chỉ cần chuyển tiếp một tin bất kỳ của họ.
+    """
+    msg = update.effective_message
+    if msg is None or msg.chat.type != ChatType.PRIVATE:
+        return
+    user = update.effective_user
+    if user is None:
+        return
+    cfg = _cfg(context)
+    if user.id not in cfg.owner_ids and not await _db(context).is_bot_admin(user.id):
+        return
+
+    goc = msg.forward_origin
+    nguoi = getattr(goc, "sender_user", None) if goc else None
+    if nguoi is None:
+        # Người gửi bật "ẩn tài khoản khi chuyển tiếp" thì Telegram không kèm ID.
+        ten_an = getattr(goc, "sender_user_name", None) if goc else None
+        ten_kenh = getattr(getattr(goc, "chat", None), "title", None) if goc else None
+        if ten_an or ten_kenh:
+            await _quiet_reply(
+                update, context,
+                f"Tin này từ <b>{html.escape(ten_an or ten_kenh)}</b> nhưng "
+                "Telegram không kèm ID — họ đã bật ẩn tài khoản khi bị chuyển tiếp.\n\n"
+                "Cách khác: reply vào tin của họ ngay trong nhóm rồi gõ "
+                "<code>/add_user</code>.",
+            )
+        return
+
+    ten = html.escape(nguoi.full_name or str(nguoi.id))
+    tag = f"\n@{nguoi.username}" if nguoi.username else ""
+    nut = InlineKeyboardMarkup([[
+        InlineKeyboardButton("➕ Acc seeding", callback_data=f"p:seed:{nguoi.id}"),
+        InlineKeyboardButton("⛔ Chặn cứng", callback_data=f"p:blk:{nguoi.id}"),
+    ]])
+    try:
+        await msg.reply_html(
+            f"👤 <b>{ten}</b>{tag}\nID: <code>{nguoi.id}</code>\n\n"
+            "Bấm nút để thêm thẳng, khỏi copy số.",
+            reply_markup=nut,
+        )
+    except TelegramError as exc:
+        log.warning("Không trả lời được tin chuyển tiếp: %s", exc)
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3318,6 +3426,10 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler(["set_group", "setgroup"], cmd_setgroup))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("start", cmd_start))
+    # Chuyen tiep tin cho bot trong chat rieng -> hien ID kem nut them.
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & filters.FORWARDED, on_forward_private
+    ))
 
     # Nhóm 1: quét mọi tin nhắn (kể cả tin đã chỉnh sửa).
     app.add_handler(
