@@ -513,6 +513,7 @@ def _extract_facts(
         ocr_text=ocr_text,
         is_question=is_question,
         sender_name=sender_name,
+        has_story=msg.story is not None,
         # Tới được đây nghĩa là _is_exempt() đã cho qua, tức KHÔNG phải admin
         # thật (admin thật bị chặn từ vòng ngoài). Nên luôn là False.
         is_real_admin=False,

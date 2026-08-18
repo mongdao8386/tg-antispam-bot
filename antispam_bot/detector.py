@@ -233,6 +233,9 @@ class MessageFacts:
     sender_name: str = ""
     # Người này có đúng là admin thật của nhóm không (đã xác minh qua API).
     is_real_admin: bool = False
+    # Tin chia sẻ story (kể cả story đã hết hạn). Không có nội dung để soi,
+    # chỉ dùng để kéo người xem sang tài khoản khác.
+    has_story: bool = False
 
 
 @dataclass
@@ -286,60 +289,6 @@ def _is_whitelisted(host: str, whitelist: set[str]) -> bool:
     return any(_host_matches(host, d) for d in whitelist if "/" not in d)
 
 
-# Link NỘI BỘ của Telegram, không phải cách dẫn người ra ngoài:
-#   t.me/c/<id>/<msg>  - trỏ tới một tin nhắn trong nhóm kín, chỉ thành viên
-#                        mới mở được, nên không dùng để kéo người đi đâu cả
-#   t.me/call/...      - link cuộc gọi thoại
-# Trước đây bị tính là "link lạ" và ban oan hàng loạt người trích dẫn tin
-# nhắn trong chính nhóm của mình.
-TELEGRAM_NOI_BO_RE = re.compile(r"(?i)^t(?:elegram)?\.me/(?:c/\d+|call/)")
-
-
-# Nhãn đứng ngay trước SỐ TIỀN GIAO DỊCH trên biên lai ngân hàng.
-_NHAN_SO_TIEN_RE = re.compile(
-    r"(?i)s[oố]\s*ti[eề]n(?:\s*gd)?|amount|so\s*tien|thanh\s*to[aá]n\s*:?"
-)
-# Nhãn đứng trước SỐ DƯ - phải bỏ qua. Đây chính là chỗ bắt oan: ảnh báo biến
-# động số dư có số dư 34.627.930 nhưng giao dịch chỉ 108.000, mà luật cũ lấy
-# số LỚN NHẤT nên tưởng là bill 34 triệu.
-_NHAN_SO_DU_RE = re.compile(r"(?i)s[oố]\s*d[uư]|balance|s[oố]\s*d[uư]\s*cu[oố]i")
-
-
-def _so_tien_giao_dich(chu: str) -> int:
-    """Số tiền của giao dịch trong ảnh biên lai. 0 nếu không xác định được.
-
-    Ưu tiên con số đứng ngay sau nhãn "Số tiền"/"Số tiền GD". Không tìm thấy
-    nhãn nào thì mới lấy số lớn nhất, nhưng vẫn bỏ những số đứng sau "Số dư".
-    """
-    def _doc(raw: str) -> int:
-        try:
-            so = int(raw.replace(".", "").replace(",", ""))
-        except ValueError:
-            return 0
-        # Số quá lớn thường là số tài khoản hoặc mã giao dịch, không phải tiền.
-        return so if so <= 100_000_000_000 else 0
-
-    # 1) Con số ngay sau nhãn "Số tiền"
-    for m in _NHAN_SO_TIEN_RE.finditer(chu):
-        doan = chu[m.end():m.end() + 40]
-        so = AMOUNT_RE.search(doan)
-        if so:
-            gia_tri = _doc(so.group(1))
-            if gia_tri:
-                return gia_tri
-
-    # 2) Không có nhãn: lấy số lớn nhất, trừ những số nằm ngay sau "Số dư"
-    vung_so_du: list[tuple[int, int]] = [
-        (m.end(), m.end() + 40) for m in _NHAN_SO_DU_RE.finditer(chu)
-    ]
-    cao_nhat = 0
-    for m in AMOUNT_RE.finditer(chu):
-        if any(dau <= m.start() < cuoi for dau, cuoi in vung_so_du):
-            continue
-        cao_nhat = max(cao_nhat, _doc(m.group(1)))
-    return cao_nhat
-
-
 def _url_allowed(url: str, whitelist: set[str]) -> bool:
     """URL có được phép không, xét cả đường dẫn.
 
@@ -350,8 +299,6 @@ def _url_allowed(url: str, whitelist: set[str]) -> bool:
     host, path = _split_url(url)
     if not host or "." not in host:
         return True  # không phải link thật
-    if TELEGRAM_NOI_BO_RE.match(f"{host}/{path}"):
-        return True  # link nội bộ Telegram, luôn cho qua
     for entry in whitelist:
         e_host, _, e_path = entry.partition("/")
         e_host = e_host.lower()
@@ -550,6 +497,11 @@ def analyse(facts: MessageFacts, cfg: Config) -> Verdict:
     elif emoji_count >= 5:
         v.add(1, f"nhiều emoji ({emoji_count})")
 
+    if facts.has_story:
+        # Story không để lại nội dung nào soi được (nhất là khi đã hết hạn),
+        # nên không chấm điểm được - chỉ có tác dụng kéo người sang tài khoản
+        # khác. Chặn thẳng.
+        v.add(v.threshold, "tin chia sẻ story")
     if facts.has_buttons:
         v.add(3, "tin nhắn kèm nút bấm (dấu hiệu bot spam)")
     if facts.via_bot:
