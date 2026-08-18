@@ -130,6 +130,8 @@ class Config:
     bill_min_amount: int = 108_000
     # Chặn người đặt tên giả mạo ban quản trị (Trợ lý, QTV, Admin...).
     block_fake_admin: bool = True
+    # Ban ở một nhóm thì đuổi luôn khỏi mọi nhóm đang quản lý.
+    ban_all_groups: bool = True
 
     # Phanh tự động: ban quá nhiều trong thời gian ngắn thường là dấu hiệu một
     # luật mới đang bắt oan hàng loạt, chứ không phải bị tấn công thật.
@@ -216,6 +218,7 @@ class Config:
             block_phones=_bool("BLOCK_PHONES", True),
             bill_min_amount=_int("BILL_MIN_AMOUNT", 108_000),
             block_fake_admin=_bool("BLOCK_FAKE_ADMIN", True),
+            ban_all_groups=_bool("BAN_ALL_GROUPS", True),
             brake_limit=_int("BRAKE_LIMIT", 5),
             brake_window=_int("BRAKE_WINDOW", 60),
             scan_qr=_bool("SCAN_QR", True),

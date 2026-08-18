@@ -668,6 +668,45 @@ async def _report(
         log.warning("Không gửi được log tới %s: %s%s", cfg.log_chat_id, exc, goi_y)
 
 
+async def _ban_moi_nhom(
+    context: ContextTypes.DEFAULT_TYPE, uid: int, nhom_goc: int, ten: str
+) -> None:
+    """Đuổi một người khỏi TẤT CẢ nhóm đang quản lý, không chỉ nhóm họ vừa phá.
+
+    Vì sao cần: kẻ rải quảng cáo vào sẵn cả 15 nhóm rồi phá lần lượt. Chỉ ban
+    ở nhóm vừa phá thì họ vẫn nguyên ở 14 nhóm còn lại, và bot cứ chạy theo
+    sau đuổi từng nhóm một. Số liệu thực tế: có tài khoản bị ban tới 13 lần ở
+    13 nhóm khác nhau - đáng lẽ chỉ cần một lần.
+    """
+    db = _db(context)
+    nhom = [g for g in await _managed_groups(context) if g != nhom_goc]
+    if not nhom:
+        return
+
+    gioi_han = asyncio.Semaphore(5)
+    xong: list[int] = []
+
+    async def duoi(gid: int) -> None:
+        async with gioi_han:
+            # Admin của nhóm khác thì tha - có thể họ chỉ trùng tên hoặc là
+            # người của mình ở nhóm đó.
+            try:
+                if uid in await _admin_ids(gid, context):
+                    return
+            except TelegramError:
+                pass
+            try:
+                await context.bot.ban_chat_member(gid, uid, revoke_messages=True)
+                await db.forget_member(gid, uid)
+                xong.append(gid)
+            except TelegramError:
+                pass  # bot không đủ quyền ở nhóm đó, hoặc người này vốn không ở đó
+
+    await asyncio.gather(*(duoi(g) for g in nhom))
+    if xong:
+        log.info("Đuổi %s (%s) khỏi %d nhóm còn lại.", ten, uid, len(xong))
+
+
 async def _check_brake(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Ban dồn dập trong thời gian ngắn -> tự chuyển sang chế độ chỉ ghi log.
 
@@ -862,6 +901,10 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Bi ban roi thi khong con la thanh vien - xoa khoi bang members de
         # khong hien trong danh sach va khong tinh vao thong ke nua.
         await db.forget_member(chat.id, uid)
+        # Đuổi luôn khỏi các nhóm còn lại. Chạy nền để không giữ chân tin
+        # nhắn kế tiếp - ban 15 nhóm mất vài giây.
+        if cfg.ban_all_groups and msg.sender_chat is None:
+            asyncio.create_task(_ban_moi_nhom(context, uid, chat.id, ten or str(uid)))
     if action in ("ban", "mute"):
         await _check_brake(context)
 
