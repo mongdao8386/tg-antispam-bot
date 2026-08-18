@@ -289,6 +289,59 @@ def _is_whitelisted(host: str, whitelist: set[str]) -> bool:
     return any(_host_matches(host, d) for d in whitelist if "/" not in d)
 
 
+# Nhãn đứng ngay trước SỐ TIỀN GIAO DỊCH trên biên lai ngân hàng.
+_NHAN_SO_TIEN_RE = re.compile(
+    r"(?i)s[oố]\s*ti[eề]n(?:\s*gd)?|amount|so\s*tien|thanh\s*to[aá]n\s*:?"
+)
+# Nhãn đứng trước SỐ DƯ - phải bỏ qua. Đây chính là chỗ bắt oan: ảnh báo biến
+# động số dư có số dư 23.732.167 nhưng giao dịch chỉ 108.000, mà nếu lấy số
+# LỚN NHẤT thì tưởng là bill 23 triệu.
+_NHAN_SO_DU_RE = re.compile(r"(?i)s[oố]\s*d[uư]")
+
+
+def _so_tien_giao_dich(chu: str) -> int:
+    """Số tiền của giao dịch trong ảnh biên lai. 0 nếu không xác định được.
+
+    Ưu tiên con số đứng ngay sau nhãn "Số tiền"/"Số tiền GD". Không tìm thấy
+    nhãn nào thì mới lấy số lớn nhất, nhưng vẫn bỏ những số đứng sau "Số dư".
+    """
+    def _doc(raw: str) -> int:
+        try:
+            so = int(raw.replace(".", "").replace(",", ""))
+        except ValueError:
+            return 0
+        # Số quá lớn thường là số tài khoản hoặc mã giao dịch, không phải tiền.
+        return so if so <= 100_000_000_000 else 0
+
+    # Chỉ nhận con số CÓ DẤU PHÂN CÁCH NGHÌN (108,000 / 23.732.167). Đây là
+    # cách phân biệt chắc nhất giữa tiền và những dãy số khác trong biên lai:
+    #   tiền           -> 108,000     23.732.167
+    #   số tài khoản   -> 254061169   31310001063501
+    #   năm/giờ        -> 2026        1824
+    co_dau = [m for m in AMOUNT_RE.finditer(chu) if "," in m.group(1) or "." in m.group(1)]
+    if not co_dau:
+        return 0
+
+    # 1) Ưu tiên con số ngay sau nhãn "Số tiền" / "Số tiền GD"
+    for nhan in _NHAN_SO_TIEN_RE.finditer(chu):
+        for m in co_dau:
+            if 0 <= m.start() - nhan.end() <= 20:
+                gia_tri = _doc(m.group(1))
+                if gia_tri:
+                    return gia_tri
+
+    # 2) Không có nhãn: bỏ những số đứng ngay sau "Số dư" rồi lấy số lớn nhất.
+    #    Cửa sổ 14 ký tự đủ cho "Số dư cuối: " nhưng KHÔNG với tay tới số nằm
+    #    sau "số dư tài khoản ACB: TK ..." - chính chỗ từng bắt nhầm.
+    vung_so_du = [(m.end(), m.end() + 14) for m in _NHAN_SO_DU_RE.finditer(chu)]
+    cao_nhat = 0
+    for m in co_dau:
+        if any(dau <= m.start() < cuoi for dau, cuoi in vung_so_du):
+            continue
+        cao_nhat = max(cao_nhat, _doc(m.group(1)))
+    return cao_nhat
+
+
 def _url_allowed(url: str, whitelist: set[str]) -> bool:
     """URL có được phép không, xét cả đường dẫn.
 
