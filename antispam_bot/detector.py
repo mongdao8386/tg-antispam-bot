@@ -125,23 +125,6 @@ CRYPTO_RE = re.compile(
     r"|(?:\bT[1-9A-HJ-NP-Za-km-z]{33}\b)"              # TRON
 )
 
-BANK_RE = re.compile(r"(?i)\b(?:stk|so tk|s[oố] t[aà]i kho[aả]n|acc?t\.?\s*no)\b\D{0,12}\d{6,20}")
-
-# Tên ngân hàng Việt Nam. Ảnh cắt chỉ còn số tài khoản thì không có chữ "STK"
-# nào cả, nhưng gần như luôn có tên hoặc mã ngân hàng bên cạnh dãy số.
-BANK_NAMES = (
-    "vietcombank|vcb|techcombank|tcb|vietinbank|viettinbank|ctg|bidv|agribank"
-    "|mbbank|mb bank|acb|sacombank|vpbank|tpbank|vib|shb|hdbank|ocb|msb|scb"
-    "|seabank|eximbank|lienvietpostbank|lpbank|namabank|pvcombank|bacabank"
-    "|abbank|baovietbank|vietabank|kienlongbank|vietbank|saigonbank|ncb"
-    "|momo|viettel money|zalopay|vnpay"
-)
-# Tên ngân hàng đứng gần một dãy 6-20 chữ số (cách nhau tối đa 40 ký tự).
-BANK_NEAR_RE = re.compile(
-    rf"(?is)\b(?:{BANK_NAMES})\b.{{0,40}}?(?<!\d)\d[\d\s.\-]{{5,25}}\d(?!\d)"
-    rf"|(?<!\d)\d[\d\s.\-]{{5,25}}\d(?!\d).{{0,40}}?\b(?:{BANK_NAMES})\b"
-)
-
 # Số điện thoại: bắt cả số trong nước lẫn số quốc tế (+84, +1, +44, +86...).
 # Kẻ spam đổi sang ghi +84 hoặc số nước ngoài để né luật chỉ bắt số bắt đầu
 # bằng 0. Hai nhánh:
@@ -150,21 +133,6 @@ BANK_NEAR_RE = re.compile(
 PHONE_RE = re.compile(
     r"(?<![\d+])(?:0(?:3|5|7|8|9)\d(?:[\s.\-]?\d){7})(?!\d)"
     r"|\+\d{1,3}[\s.\-]?\d(?:[\s.\-]?\d){5,13}(?!\d)"
-)
-
-# Hoá đơn / biên lai chuyển khoản. Ảnh chụp bill là chiêu khoe "đã trả tiền"
-# để dụ nạn nhân tin tưởng.
-BILL_HINT_RE = re.compile(
-    r"(?i)chuy[eể]n\s*kho[aả]n|chuy[eể]n\s*ti[eề]n|nh[aậ]n\s*ti[eề]n"
-    r"|th[aà]nh\s*c[oô]ng|giao\s*d[iị]ch|s[oố]\s*ti[eề]n|bi[eê]n\s*lai"
-    r"|h[oó]a\s*[dđ][oơ]n|thanh\s*to[aá]n|ng[uư][oờ]i\s*nh[aậ]n"
-    r"|transfer|successful|receipt|s[oố]\s*d[uư]|t[iị]ch\s*l[uũ]y"
-    r"|n[oộ]i\s*dung\s*chuy[eể]n|s[oố]\s*d[uư]\s*kh[aả]\s*d[uụ]ng"
-)
-# Số tiền kiểu Việt Nam: 108.000 / 108,000 / 1.500.000đ / 500000 VND
-AMOUNT_RE = re.compile(
-    r"(?<![\d.,])(\d{1,3}(?:[.,]\d{3})+|\d{4,12})\s*(?:vn[dđ]|đ|d\b)?",
-    re.IGNORECASE,
 )
 
 # Tên tự xưng chức vụ. Người thật hiếm khi đặt tên là "Trợ lý" hay "QTV";
@@ -288,59 +256,6 @@ def _host_matches(host: str, pattern: str) -> bool:
 def _is_whitelisted(host: str, whitelist: set[str]) -> bool:
     """Chỉ xét tên miền. Mục whitelist có đường dẫn không tính ở đây."""
     return any(_host_matches(host, d) for d in whitelist if "/" not in d)
-
-
-# Nhãn đứng ngay trước SỐ TIỀN GIAO DỊCH trên biên lai ngân hàng.
-_NHAN_SO_TIEN_RE = re.compile(
-    r"(?i)s[oố]\s*ti[eề]n(?:\s*gd)?|amount|so\s*tien|thanh\s*to[aá]n\s*:?"
-)
-# Nhãn đứng trước SỐ DƯ - phải bỏ qua. Đây chính là chỗ bắt oan: ảnh báo biến
-# động số dư có số dư 23.732.167 nhưng giao dịch chỉ 108.000, mà nếu lấy số
-# LỚN NHẤT thì tưởng là bill 23 triệu.
-_NHAN_SO_DU_RE = re.compile(r"(?i)s[oố]\s*d[uư]")
-
-
-def _so_tien_giao_dich(chu: str) -> int:
-    """Số tiền của giao dịch trong ảnh biên lai. 0 nếu không xác định được.
-
-    Ưu tiên con số đứng ngay sau nhãn "Số tiền"/"Số tiền GD". Không tìm thấy
-    nhãn nào thì mới lấy số lớn nhất, nhưng vẫn bỏ những số đứng sau "Số dư".
-    """
-    def _doc(raw: str) -> int:
-        try:
-            so = int(raw.replace(".", "").replace(",", ""))
-        except ValueError:
-            return 0
-        # Số quá lớn thường là số tài khoản hoặc mã giao dịch, không phải tiền.
-        return so if so <= 100_000_000_000 else 0
-
-    # Chỉ nhận con số CÓ DẤU PHÂN CÁCH NGHÌN (108,000 / 23.732.167). Đây là
-    # cách phân biệt chắc nhất giữa tiền và những dãy số khác trong biên lai:
-    #   tiền           -> 108,000     23.732.167
-    #   số tài khoản   -> 254061169   31310001063501
-    #   năm/giờ        -> 2026        1824
-    co_dau = [m for m in AMOUNT_RE.finditer(chu) if "," in m.group(1) or "." in m.group(1)]
-    if not co_dau:
-        return 0
-
-    # 1) Ưu tiên con số ngay sau nhãn "Số tiền" / "Số tiền GD"
-    for nhan in _NHAN_SO_TIEN_RE.finditer(chu):
-        for m in co_dau:
-            if 0 <= m.start() - nhan.end() <= 20:
-                gia_tri = _doc(m.group(1))
-                if gia_tri:
-                    return gia_tri
-
-    # 2) Không có nhãn: bỏ những số đứng ngay sau "Số dư" rồi lấy số lớn nhất.
-    #    Cửa sổ 14 ký tự đủ cho "Số dư cuối: " nhưng KHÔNG với tay tới số nằm
-    #    sau "số dư tài khoản ACB: TK ..." - chính chỗ từng bắt nhầm.
-    vung_so_du = [(m.end(), m.end() + 14) for m in _NHAN_SO_DU_RE.finditer(chu)]
-    cao_nhat = 0
-    for m in co_dau:
-        if any(dau <= m.start() < cuoi for dau, cuoi in vung_so_du):
-            continue
-        cao_nhat = max(cao_nhat, _doc(m.group(1)))
-    return cao_nhat
 
 
 def _url_allowed(url: str, whitelist: set[str]) -> bool:
@@ -496,19 +411,18 @@ def analyse(facts: MessageFacts, cfg: Config) -> Verdict:
     if CRYPTO_RE.search(scannable):
         v.add(v.threshold, "địa chỉ ví crypto")
 
-    # Ảnh có phải là thông báo/biên lai ngân hàng thật không. Loại này LUÔN có
-    # tên ngân hàng cạnh số tài khoản, nên nếu cứ thấy cặp đó là chặn thì
-    # người chụp màn hình báo biến động số dư cũng bị vạ lây. Với loại này,
-    # để mục "ảnh bill" bên dưới quyết theo SỐ TIỀN - đúng ý "trên 108 nghìn".
-    la_thong_bao_nh = bool(facts.ocr_text and BILL_HINT_RE.search(facts.ocr_text))
+    # CỐ Ý KHÔNG có luật nào bắt số tài khoản / tên ngân hàng / ảnh biên lai.
+    #
+    # Đã thử và bỏ: mọi cách nhận diện đều bắt oan hàng loạt, vì thành viên
+    # trong nhóm đăng ảnh chuyển khoản là chuyện bình thường, mà ảnh đó luôn
+    # có đủ tên ngân hàng, số tài khoản và số tiền - không khác gì ảnh spam.
+    # Mỗi lần vá cho một mẫu ảnh thì hôm sau lại lọt mẫu khác (biến động số
+    # dư, "chuyển tiền thành công", app khác câu chữ khác...).
+    #
+    # QR mới là thứ đáng chặn: mã VietQR/EMV chuyển thẳng tiền đi được, và
+    # người dùng thường không đăng QR thanh toán của mình trong nhóm chat.
+    # Xem mục "Mã QR trong ảnh" bên dưới.
 
-    if not la_thong_bao_nh:
-        if BANK_RE.search(scannable):
-            v.add(v.threshold, "số tài khoản ngân hàng")
-        elif BANK_NEAR_RE.search(scannable):
-            # Không có chữ "STK" nhưng có tên ngân hàng cạnh một dãy số dài -
-            # đúng kiểu ảnh cắt chỉ để lại thông tin chuyển khoản.
-            v.add(v.threshold, "tên ngân hàng kèm số tài khoản")
     # Số điện thoại: quét cả chữ trong ảnh, vì tờ rơi quảng cáo luôn in số
     # liên hệ lên ảnh chứ không gõ vào tin nhắn.
     phones = {
@@ -522,15 +436,6 @@ def analyse(facts: MessageFacts, cfg: Config) -> Verdict:
             v.add(2, "số điện thoại liên hệ")
     if MONEY_RE.search(text):
         v.add(1, "hứa hẹn thu nhập bằng con số")
-
-    # --- Ảnh bill chuyển khoản ---
-    # Khoe biên lai để tạo lòng tin ("tôi vừa rút được tiền"). Chỉ xét khi có
-    # dấu hiệu biên lai đi kèm, để con số đơn lẻ trong ảnh không bị bắt oan.
-    if cfg.bill_min_amount > 0 and facts.ocr_text and BILL_HINT_RE.search(facts.ocr_text):
-        so_tien = _so_tien_giao_dich(facts.ocr_text)
-        # "trên 108 nghìn" nghĩa là LỚN HƠN, đúng 108.000 thì thôi.
-        if so_tien > cfg.bill_min_amount:
-            v.add(v.threshold, f"ảnh bill chuyển khoản ({so_tien:,}đ)".replace(",", "."))
 
     # --- Giả mạo ban quản trị ---
     # Đặt tên "Trợ lý", "QTV", "Admin" mà không phải admin thật là chiêu dụ
