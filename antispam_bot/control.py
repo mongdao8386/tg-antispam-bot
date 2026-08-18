@@ -61,6 +61,36 @@ async def clear_action(db: Storage) -> None:
     await db.set_setting("action", "")
 
 
+# Các công tắc bật/tắt được ngay trong bot, không phải sửa .env rồi khởi động
+# lại. Giá trị lưu trong DB đè lên giá trị đọc từ .env.
+CONG_TAC = {
+    "scan_ocr": "Đọc chữ trong ảnh (OCR)",
+    "scan_qr": "Quét mã QR",
+    "ban_all_groups": "Ban là đuổi khỏi mọi nhóm",
+    "block_phones": "Chặn số điện thoại lạ",
+    "block_mentions": "Chặn @ không được phép",
+    "block_fake_admin": "Chặn tên giả mạo admin",
+    "block_forwards": "Chặn tin chuyển tiếp",
+    "block_links": "Chặn link lạ",
+}
+
+
+async def get_flag(db: Storage, cfg: Config, ten: str) -> bool:
+    """Giá trị đang áp dụng của một công tắc: ưu tiên DB, sau đó tới .env."""
+    raw = await db.get_setting(f"cfg:{ten}")
+    if raw in ("1", "0"):
+        return raw == "1"
+    return bool(getattr(cfg, ten, False))
+
+
+async def set_flag(db: Storage, ten: str, bat: bool) -> None:
+    await db.set_setting(f"cfg:{ten}", "1" if bat else "0")
+
+
+async def all_flags(db: Storage, cfg: Config) -> dict[str, bool]:
+    return {ten: await get_flag(db, cfg, ten) for ten in CONG_TAC}
+
+
 async def note_brake(db: Storage) -> None:
     await db.set_setting("brake_at", str(int(time.time())))
 

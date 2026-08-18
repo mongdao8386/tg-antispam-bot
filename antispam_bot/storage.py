@@ -229,6 +229,27 @@ class Storage:
         """Các lượt ban/mute gần nhất trên MỌI nhóm, mới nhất trước."""
         return await self._run(self._recent_bans, limit)
 
+    def _banned_user_ids(self) -> list[int]:
+        cur = self._conn.execute(
+            "SELECT DISTINCT user_id FROM offences WHERE action IN ('ban','mute') "
+            "AND user_id > 0 ORDER BY user_id"
+        )
+        return [r[0] for r in cur.fetchall()]
+
+    async def banned_user_ids(self) -> list[int]:
+        """Mọi user_id từng bị ban/mute, không trùng lặp."""
+        return await self._run(self._banned_user_ids)
+
+    def _banned_pairs(self) -> set[tuple[int, int]]:
+        cur = self._conn.execute(
+            "SELECT DISTINCT chat_id, user_id FROM offences WHERE action IN ('ban','mute')"
+        )
+        return {(r[0], r[1]) for r in cur.fetchall()}
+
+    async def banned_pairs(self) -> set[tuple[int, int]]:
+        """Các cặp (nhóm, người) đã ban rồi - để khỏi gọi API lại lần nữa."""
+        return await self._run(self._banned_pairs)
+
     def _count_recent_bans(self, seconds: int) -> int:
         cur = self._conn.execute(
             "SELECT COUNT(*) FROM offences WHERE action IN ('ban','mute') AND ts >= ?",

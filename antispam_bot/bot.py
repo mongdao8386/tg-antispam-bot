@@ -169,6 +169,8 @@ async def _chat_rules(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> ChatR
         "whitelist_domains": cfg.whitelist_domains | await db.get_whitelist(chat_id),
         "allowed_usernames": cfg.allowed_usernames | ats,
         "allowed_phones": cfg.allowed_phones | await db.get_phones(chat_id),
+        # Công tắc bật/tắt từ /panel đè lên giá trị trong .env.
+        **await control.all_flags(db, cfg),
     })
     rules = ChatRules(
         cfg=eff,
@@ -562,8 +564,10 @@ async def _scan_image(
     thứ tải riêng là phí băng thông và thời gian.
     """
     cfg = _cfg(context)
-    want_qr = cfg.scan_qr and qrscan.AVAILABLE
-    want_ocr = cfg.scan_ocr and ocr.AVAILABLE
+    db = _db(context)
+    # Đọc qua công tắc để /panel bật/tắt được ngay, không cần khởi động lại.
+    want_qr = await control.get_flag(db, cfg, "scan_qr") and qrscan.AVAILABLE
+    want_ocr = await control.get_flag(db, cfg, "scan_ocr") and ocr.AVAILABLE
     if not want_qr and not want_ocr:
         return False, [], ""
 
@@ -903,7 +907,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await db.forget_member(chat.id, uid)
         # Đuổi luôn khỏi các nhóm còn lại. Chạy nền để không giữ chân tin
         # nhắn kế tiếp - ban 15 nhóm mất vài giây.
-        if cfg.ban_all_groups and msg.sender_chat is None:
+        if await control.get_flag(db, cfg, "ban_all_groups") and msg.sender_chat is None:
             asyncio.create_task(_ban_moi_nhom(context, uid, chat.id, ten or str(uid)))
     if action in ("ban", "mute"):
         await _check_brake(context)
@@ -2118,8 +2122,23 @@ def _panel_keyboard(dang_ngung: bool, che_do: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📋 Ban gần đây", callback_data="p:last"),
             InlineKeyboardButton("↩️ Gỡ ban vừa rồi", callback_data="p:undo"),
         ],
-        [InlineKeyboardButton("🔄 Làm mới", callback_data="p:refresh")],
+        [
+            InlineKeyboardButton("⚙️ Bật/tắt chức năng", callback_data="p:congtac"),
+            InlineKeyboardButton("🔄 Làm mới", callback_data="p:refresh"),
+        ],
     ])
+
+
+def _congtac_keyboard(co: dict[str, bool]) -> InlineKeyboardMarkup:
+    """Mỗi công tắc một nút; bấm là đảo trạng thái ngay."""
+    hang = [
+        [InlineKeyboardButton(
+            f"{'✅' if co[ten] else '⬜'}  {nhan}", callback_data=f"p:cong:{ten}"
+        )]
+        for ten, nhan in control.CONG_TAC.items()
+    ]
+    hang.append([InlineKeyboardButton("← Quay lại", callback_data="p:refresh")])
+    return InlineKeyboardMarkup(hang)
 
 
 async def cmd_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2295,6 +2314,34 @@ async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except TelegramError:
             pass
         return
+    elif data == "congtac":
+        co = await control.all_flags(db, cfg)
+        await q.answer()
+        try:
+            await q.edit_message_text(
+                "⚙️ <b>Bật/tắt chức năng</b>\n\n"
+                "Bấm để đảo trạng thái. Có hiệu lực ngay, không cần khởi động lại.",
+                parse_mode="HTML", reply_markup=_congtac_keyboard(co),
+            )
+        except TelegramError:
+            pass
+        return
+    elif data.startswith("cong:"):
+        ten = data.split(":", 1)[1]
+        if ten in control.CONG_TAC:
+            moi = not await control.get_flag(db, cfg, ten)
+            await control.set_flag(db, ten, moi)
+            _invalidate_rules(context)
+            await q.answer(f"{control.CONG_TAC[ten]}: {'BẬT' if moi else 'TẮT'}")
+            try:
+                await q.edit_message_reply_markup(
+                    reply_markup=_congtac_keyboard(await control.all_flags(db, cfg))
+                )
+            except TelegramError:
+                pass
+        else:
+            await q.answer()
+        return
     elif data == "undo":
         ket_qua = await _undo_last(context)
         await q.answer("Đã gỡ" if "Đã gỡ" in ket_qua else "Không gỡ được", show_alert=False)
@@ -2444,6 +2491,152 @@ async def cmd_web(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Liên kết dùng <b>một lần</b>, hết hạn sau 5 phút. "
         f"Đăng nhập rồi thì giữ được {cfg.web_session_hours} giờ.{canh_bao}",
     )
+
+
+# ---------------------------------------------------------------------------
+# Quét lại và đuổi người đã bị ban khỏi mọi nhóm — /quetlai
+# ---------------------------------------------------------------------------
+
+
+async def _chay_quet_lai(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_id: int) -> None:
+    """Đuổi mọi người từng bị ban khỏi tất cả nhóm. Chạy nền, báo tiến độ.
+
+    Đây là việc dài (hàng nghìn lệnh gọi API) nên phải:
+      * bỏ qua cặp (người, nhóm) đã ban rồi - đỡ được vài trăm lệnh
+      * giới hạn số lệnh chạy cùng lúc, tránh đụng trần tốc độ của Telegram
+      * sửa lại chính tin nhắn tiến độ thay vì gửi tin mới
+      * dừng được giữa chừng bằng /dungquet
+    """
+    bd = context.application.bot_data
+    db = _db(context)
+    nhom = await _managed_groups(context)
+    da_ban = await db.banned_pairs()          # {(chat_id, user_id)} đã ban rồi
+    nguoi = await db.banned_user_ids()
+    if not nhom or not nguoi:
+        await context.bot.edit_message_text(
+            "Không có gì để quét.", chat_id=chat_id, message_id=msg_id
+        )
+        bd.pop("quet_dang_chay", None)
+        return
+
+    # Admin của từng nhóm - tha, không đuổi nhầm người của mình.
+    admin_nhom: dict[int, set[int]] = {}
+    for gid in nhom:
+        admin_nhom[gid] = await _admin_ids(gid, context)
+
+    tong = len(nguoi)
+    gioi_han = asyncio.Semaphore(4)
+    duoi_duoc = 0
+    da_xet = 0
+    bat_dau = time.monotonic()
+
+    async def lam_mot(uid: int) -> int:
+        nonlocal duoi_duoc
+        so = 0
+        for gid in nhom:
+            if bd.get("quet_dung"):
+                return so
+            if (gid, uid) in da_ban or uid in admin_nhom.get(gid, ()):
+                continue
+            async with gioi_han:
+                try:
+                    await context.bot.ban_chat_member(gid, uid, revoke_messages=True)
+                    await db.forget_member(gid, uid)
+                    so += 1
+                except TelegramError:
+                    pass
+        duoi_duoc += so
+        return so
+
+    for i, uid in enumerate(nguoi, 1):
+        if bd.get("quet_dung"):
+            break
+        await lam_mot(uid)
+        da_xet = i
+        # Cập nhật tiến độ mỗi 15 người, đủ để thấy chạy mà không spam API.
+        if i % 15 == 0 or i == tong:
+            phut = (time.monotonic() - bat_dau) / 60
+            con = (phut / i) * (tong - i) if i else 0
+            o = 20 * i // tong
+            try:
+                await context.bot.edit_message_text(
+                    f"🧹 <b>Đang quét lại</b>\n"
+                    f"<code>[{'█' * o}{'░' * (20 - o)}]</code> {i * 100 // tong}%\n"
+                    f"Đã xét: <b>{i}</b>/{tong} người\n"
+                    f"Đã đuổi thêm: <b>{duoi_duoc}</b> lượt\n"
+                    f"Còn khoảng {con:.0f} phút\n\n"
+                    f"Dừng giữa chừng: /dungquet",
+                    chat_id=chat_id, message_id=msg_id, parse_mode="HTML",
+                )
+            except TelegramError:
+                pass
+
+    bd.pop("quet_dang_chay", None)
+    dung_som = bd.pop("quet_dung", False)
+    phut = (time.monotonic() - bat_dau) / 60
+    try:
+        await context.bot.edit_message_text(
+            ("⏹ <b>Đã dừng giữa chừng</b>\n" if dung_som else "✅ <b>Quét xong</b>\n")
+            + f"Đã xét <b>{da_xet}</b>/{tong} người trong {phut:.0f} phút.\n"
+            f"Đuổi thêm <b>{duoi_duoc}</b> lượt khỏi các nhóm họ còn sót lại.",
+            chat_id=chat_id, message_id=msg_id, parse_mode="HTML",
+        )
+    except TelegramError:
+        pass
+    log.info("Quét lại xong: %d/%d người, đuổi thêm %d lượt.", da_xet, tong, duoi_duoc)
+
+
+async def cmd_quetlai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/quetlai — đuổi mọi người từng bị ban khỏi tất cả nhóm đang quản lý."""
+    if not _require_owner(update, context):
+        try:
+            await update.effective_message.delete()
+        except TelegramError:
+            pass
+        return
+    bd = context.application.bot_data
+    if bd.get("quet_dang_chay"):
+        await _quiet_reply(update, context, "Đang quét rồi. Dừng bằng /dungquet.")
+        return
+
+    db = _db(context)
+    nguoi = await db.banned_user_ids()
+    nhom = await _managed_groups(context)
+    if not nguoi or not nhom:
+        await _quiet_reply(update, context, "Chưa có ai bị ban, hoặc chưa đăng ký nhóm nào.")
+        return
+
+    # Xác nhận trước: đây là việc dài và không có nút hoàn tác.
+    if not context.args or context.args[0].lower() not in ("ok", "dongy", "yes"):
+        con_lai = len(nguoi) * len(nhom) - len(await db.banned_pairs())
+        await _quiet_reply(
+            update, context,
+            f"🧹 <b>Quét lại và đuổi hết</b>\n\n"
+            f"Sẽ xét <b>{len(nguoi)}</b> người từng bị ban, trên <b>{len(nhom)}</b> nhóm.\n"
+            f"Tối đa khoảng <b>{max(con_lai, 0):,}</b> lệnh, mất chừng "
+            f"<b>{max(con_lai, 0) / 600:.0f}-{max(con_lai, 0) / 300:.0f} phút</b>.\n\n"
+            f"Người là admin nhóm sẽ được tha.\n"
+            f"Việc này <b>không hoàn tác được</b>.\n\n"
+            f"Chắc chắn thì gõ: <code>/quetlai ok</code>".replace(",", "."),
+        )
+        return
+
+    bd["quet_dang_chay"] = True
+    bd["quet_dung"] = False
+    msg = await update.effective_message.reply_html("🧹 Bắt đầu quét lại...")
+    asyncio.create_task(_chay_quet_lai(context, msg.chat_id, msg.message_id))
+
+
+async def cmd_dungquet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/dungquet — dừng việc quét lại đang chạy."""
+    if not _require_owner(update, context):
+        return
+    bd = context.application.bot_data
+    if not bd.get("quet_dang_chay"):
+        await _quiet_reply(update, context, "Không có việc quét nào đang chạy.")
+        return
+    bd["quet_dung"] = True
+    await _quiet_reply(update, context, "Đang dừng... đợi lệnh hiện tại xong.")
 
 
 async def cmd_setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2649,6 +2842,7 @@ _OWNER_CMDS = [
     BotCommand("addphone", "Cho phép số điện thoại"),
     BotCommand("phones", "Danh sách SĐT được phép"),
     BotCommand("web", "Mở bảng điều khiển web"),
+    BotCommand("quetlai", "Đuổi người đã ban khỏi mọi nhóm"),
     BotCommand("setgroup", "Quản lý danh sách nhóm"),
     BotCommand("id", "Xem ID Telegram của bạn"),
 ]
@@ -2676,7 +2870,7 @@ _GROUP_ADMIN_CMDS = [
 
 
 # Lệnh chỉ owner mới dùng được — ẩn khỏi menu của bot admin thường.
-_OWNER_ONLY = {"addadm", "deladm", "setgroup", "web"}
+_OWNER_ONLY = {"addadm", "deladm", "setgroup", "web", "quetlai", "dungquet"}
 
 
 async def _apply_admin_menu(bot, user_id: int, is_owner: bool = False) -> bool:
@@ -3077,6 +3271,8 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler("delphone", cmd_delphone))
     app.add_handler(CommandHandler("phones", cmd_phones))
     app.add_handler(CommandHandler("web", cmd_web))
+    app.add_handler(CommandHandler("quetlai", cmd_quetlai))
+    app.add_handler(CommandHandler("dungquet", cmd_dungquet))
     app.add_handler(CommandHandler("setgroup", cmd_setgroup))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("start", cmd_start))
