@@ -45,7 +45,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import control, ocr, presets, qrscan, web
+from . import control, ngucanh, ocr, presets, qrscan, web
 from .config import VALID_ACTIONS, Config
 from .detector import MessageFacts, Verdict, analyse
 from .normalize import (
@@ -896,13 +896,20 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     benign_question = plain_text and looks_like_question(msg.text or "")
 
     # Từ cấm: soi sau khi có QR + OCR để gộp cả chữ nằm trong ảnh.
-    if not force_punish and not benign_question and rules.keywords:
+    if not force_punish and rules.keywords:
         combined = " ".join(filter(None, [msg.text, msg.caption, *qr_payloads, ocr_text]))
         if combined:
-            matched = _khop_tu_cam(rules.keywords, combined)
-            if matched:
-                force_punish = True
-                force_reason = f"từ bị cấm: {', '.join(sorted(matched)[:3])}"
+            khop = _khop_tu_cam(rules.keywords, combined)
+            if khop:
+                # Khớp chuỗi thôi chưa đủ. Xét xem người viết đang nhắm vào ai:
+                # tố cáo nhóm này, hay chỉ kể chuyện phim / trích tin / đặt câu
+                # hỏi. Đây là chỗ khác biệt so với bot chỉ so chuỗi đơn thuần.
+                matched, bo_qua = ngucanh.loc(combined, khop)
+                if matched:
+                    force_punish = True
+                    force_reason = f"từ bị cấm: {', '.join(sorted(matched)[:3])}"
+                elif bo_qua:
+                    log.debug("Bỏ qua từ cấm theo ngữ cảnh: %s", "; ".join(bo_qua[:3]))
 
     facts = _extract_facts(
         msg, is_new, offences, has_qr, qr_payloads, fwd_exempt=fwd_exempt,
@@ -924,14 +931,6 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Chế độ lúc chạy (đổi bằng /action hoặc do phanh tự động) đè lên .env.
     che_do = await control.effective_action(db, cfg)
-
-    # Chỉ MỘT dấu hiệu thì hạ xuống mức xoá tin, không ban. Đo trên 1.759 lượt
-    # ban thật: 31% chỉ dựa vào một dấu hiệu duy nhất, và đó là nguồn ban oan
-    # chính - OCR đọc nhầm, từ đồng âm, ảnh chụp màn hình bình thường.
-    # Hai dấu hiệu độc lập cùng chỉ vào một tin thì hiếm khi cùng sai.
-    if che_do in ("ban", "mute") and not verdict.nen_ban:
-        che_do = "delete"
-        verdict.reasons.append("[chỉ 1 dấu hiệu → chỉ xoá tin, không ban]")
 
     action = "report" if che_do == "report" else await _punish(context, msg, che_do)
 
@@ -1242,9 +1241,17 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     kw_list = await db.get_keywords_effective(target.chat_id)
     combined = " ".join(filter(None, [target.text, target.caption, *qr_payloads, ocr_text]))
     # Dùng chung hàm với scan() để /check luôn cho cùng kết quả với lúc chạy thật.
-    matched_kw = _khop_tu_cam([(k, *_dang_tu_cam(k)) for k in kw_list], combined)
+    khop_kw = _khop_tu_cam([(k, *_dang_tu_cam(k)) for k in kw_list], combined)
+    matched_kw, kw_bo_qua = ngucanh.loc(combined, khop_kw)
 
     list_note = ""
+    if kw_bo_qua:
+        # Cho admin thấy bot ĐÃ thấy từ cấm nhưng cố tình bỏ qua, và vì sao.
+        # Không hiện thì admin tưởng bot mù, rồi lại thêm luật thừa.
+        list_note += (
+            "\nℹ️ Có từ cấm nhưng <b>bỏ qua theo ngữ cảnh</b>: "
+            + html.escape("; ".join(kw_bo_qua[:3]))
+        )
     if matched_kw:
         hits = html.escape(", ".join(sorted(matched_kw)[:5]))
         list_note = f"\n⛔ <b>Chứa từ cấm</b>: <code>{hits}</code> — sẽ bị ban ngay"
