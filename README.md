@@ -7,27 +7,75 @@ kênh log riêng.
 
 ## Bot bắt được gì
 
-| Dấu hiệu | Xử lý |
+Mỗi luật ở đây **tự nó đủ để xử lý** — khớp là ban, không khớp thì thôi. Không có
+cộng dồn, không có ngưỡng, không có "gần đủ điểm".
+
+| Luật | Bật/tắt được |
 |---|---|
-| Tin nhắn chuyển tiếp (forward) từ người/kênh khác | chặn cứng (bật/tắt được) |
-| Tin gửi dưới danh nghĩa kênh lạ (`sender_chat`) | chặn cứng, chặn luôn cả kênh đó |
-| Link ngoài whitelist | chặn cứng (bật/tắt được) |
-| Link rút gọn (bit.ly, cutt.ly…), tên miền rác (.xyz, .top, .icu…) | cộng điểm |
-| Link mời vào nhóm riêng `t.me/+…`, `t.me/joinchat/…` | cộng điểm |
-| Link viết né bộ lọc: `abc (dot) com`, `abc [.] com` | cộng điểm |
-| **Ảnh chứa mã QR** — giải mã rồi soi nội dung | xem mục riêng bên dưới |
-| Từ khoá lừa đảo tiếng Việt & tiếng Anh (~150 cụm) | cộng điểm theo mức độ |
-| Địa chỉ ví crypto, số tài khoản ngân hàng, số điện thoại | cộng điểm |
-| Ký tự vô hình, chữ Cyrillic giả Latin, leetspeak, `l.ừ.a đ.ả.o` | cộng điểm |
-| Lạm dụng emoji, viết hoa toàn bộ, tin có nút bấm | cộng điểm |
-| Người mới vào nhóm / đã từng vi phạm | hạ ngưỡng, dễ bị chặn hơn |
+| Tin nhắn chuyển tiếp (forward) từ người/kênh khác | có |
+| Tin gửi dưới danh nghĩa kênh lạ (`sender_chat`) | có |
+| Link ngoài whitelist | có |
+| Link rút gọn (bit.ly, cutt.ly…), tên miền rác (.xyz, .top, .icu…) | không |
+| Link mời vào nhóm riêng `t.me/+…`, `t.me/joinchat/…` | không |
+| Link viết né bộ lọc: `abc (dot) com`, `abc [.] com` | không |
+| **Nội dung mã QR trong ảnh** | có (`SCAN_QR`) |
+| Từ khoá lừa đảo tiếng Việt & tiếng Anh (~110 cụm) — **có xét ngữ cảnh** | không |
+| Địa chỉ ví crypto | không |
+| Số điện thoại lạ | có |
+| Tên giả mạo ban quản trị ("Trợ lý", "QTV", "Admin"…) | có |
+| Nhắc `@username` không được phép | có |
+| Ký tự vô hình, cắt vụn chữ bằng dấu câu (`l.ừ.a đ.ả.o`) | không |
+| Tin chia sẻ story, tin kèm nút bấm | không |
+| Dồn tin / lặp nội dung / nhiều acc phối hợp | có (`CHONG_RAI`) |
 
 Từ khoá phủ các nhóm lừa đảo phổ biến: việc nhẹ lương cao, tuyển CTV, cờ bạc/nhà cái,
 đầu tư "cam kết lợi nhuận", airdrop crypto, vay nặng lãi, làm bằng giả, chiếm OTP,
 mua bán tài khoản ngân hàng, nội dung người lớn.
 
-**Chấm điểm thay vì chặn cứng theo từ khoá** — một từ nhạy cảm đơn lẻ không đủ để bị
-xử lý, nên câu như *"Lừa đảo nhiều quá, mọi người cẩn thận nhé"* vẫn được cho qua.
+### Vì sao không còn chấm điểm
+
+Bot này từng cộng điểm: mỗi dấu hiệu một số điểm, vượt ngưỡng thì xử lý. Nghe hợp lý,
+nhưng đo trên **1.761 lượt ban thật** của chính nó:
+
+| | Số lượt | |
+|---|---|---|
+| Có sẵn một luật đủ mạnh, cộng dồn không đổi gì | 1.508 | 99,4% |
+| Thật sự do cộng dồn quyết định | **10** | **0,6%** |
+
+Mười lượt đó gần như đều là ban oan: *"số điện thoại + nhiều emoji"*, *"uy tín + đã vi
+phạm 1 lần trước đó"*. Lớp điểm số không cứu được ca nào mà chỉ thêm oan sai.
+
+Nguyên nhân sâu hơn: các dấu hiệu yếu **không độc lập với nhau**. Tổ hợp hay gặp nhất
+là *"link lạ + thành viên mới gửi link + không có username gửi link"* — nhìn tưởng ba
+bằng chứng, thực ra là **một sự việc đếm ba lần**. Cộng lại thành tự tin giả.
+
+Nên bỏ hẳn. Luật nào không đủ chắc để một mình kết tội thì không có lý do tồn tại, và
+đã xoá luôn: lạm dụng emoji, viết hoa toàn bộ, nhắc con số tiền, nhắc từ 3 tài khoản
+trở lên, "ảnh này *có vẻ* chứa mã QR", và toàn bộ luật về lý lịch người gửi (thành
+viên mới, không username, đã từng vi phạm).
+
+**Lý lịch không kết tội.** Người từng vi phạm gửi một tin sạch thì tin đó vẫn sạch.
+
+Chạy lại 1.766 lượt ban cũ qua bộ luật mới: **95% vẫn bị ban**. Phần rơi ra gần như
+toàn bộ là luật bill ngân hàng đã bỏ từ trước, cộng đúng những tổ hợp ban oan kể trên.
+Bù lại mỗi lần ban giờ chỉ ra được **một lý do đọc hiểu ngay**, thay vì bốn dấu hiệu
+mơ hồ cộng lại thành 5/5. Tốc độ: **0,12 ms/tin**.
+
+### Xét ngữ cảnh trước khi kết tội
+
+Bot phổ thông chỉ so chuỗi: thấy "lừa đảo" là ban. Kết quả là ban oan người kể chuyện
+phim, người trích tin tức, người đặt câu hỏi. Bot này xét thêm **người viết đang nhắm
+vào ai**:
+
+| Câu | Kết luận |
+|---|---|
+| "nhóm này lừa đảo đấy" | nhắm vào nhóm → xử lý |
+| "bộ phim nói về một vụ lừa đảo" | đang kể chuyện → bỏ qua |
+| "nhóm này có lừa đảo không?" | đang hỏi → bỏ qua |
+| "công an vừa bắt nhóm lừa đảo" | trích tin tức → bỏ qua |
+| "sàn kia lừa đảo, qua đây uy tín nè, ib" | kèm dấu hiệu quảng cáo → xử lý |
+
+Áp dụng cho cả từ khoá dựng sẵn lẫn danh sách từ cấm tự đặt. Xem [ngucanh.py](antispam_bot/ngucanh.py).
 
 ## Quét mã QR trong ảnh
 
@@ -40,15 +88,14 @@ link và từ khoá** như chữ trong tin nhắn. Ngoài ra có luật riêng c
 | QR chứa ví crypto (`bitcoin:`, `ethereum:`, địa chỉ ví) | chặn cứng |
 | QR dẫn tới link ngoài whitelist | chặn cứng |
 | QR mời vào nhóm/kênh Telegram (`t.me/+…`, `tg://`) | chặn cứng |
-| Ảnh có QR nhưng không đọc được nội dung (mờ, chụp nghiêng) | +3 điểm |
-| Ảnh có QR nói chung | +2 điểm; thành viên mới thêm +2 → bị chặn |
+| Ảnh có QR nhưng không đọc được nội dung (mờ, chụp nghiêng) | **bỏ qua** |
+| QR dẫn tới domain trong whitelist, QR wifi | **bỏ qua** |
 
 Bot xử lý ảnh (`photo`), file ảnh (`document` mime `image/*`) và sticker tĩnh. Ảnh quá
-mờ hoặc QR bị bóp méo nhiều thì có thể không giải được — nhưng chính việc *dò ra khung
-QR mà không đọc nổi* đã là tín hiệu đáng ngờ và vẫn được cộng điểm.
-
-QR vô hại vẫn qua được: QR wifi, QR trỏ tới domain trong whitelist đều dưới ngưỡng khi
-người gửi là thành viên cũ.
+mờ hoặc QR bị bóp méo nhiều thì có thể không giải được. Riêng việc *dò ra khung QR mà
+không đọc nổi* thì **cố ý không tính là vi phạm**: bộ dò nhận nhầm hoa văn ảnh đời
+thường (đĩa cơm, vân vải) rất nhiều — đã từng gây 15/15 lượt ban oan liên tiếp.
+Chỉ **nội dung giải được** mới bị xét.
 
 **Cần cài thêm OpenCV** (`opencv-python-headless`, đã nằm trong `requirements.txt`).
 Nếu không nạp được, bot vẫn chạy bình thường và chỉ ghi một cảnh báo lúc khởi động —
@@ -157,7 +204,7 @@ Toàn bộ nằm trong `.env` (xem mô tả từng dòng trong `.env.example`). 
 - `ACTION` — `ban` (mặc định) | `mute` | `delete` | `report`.
   **Khuyến nghị chạy `report` 1–2 ngày đầu**: bot không đụng gì cả, chỉ ghi log để bạn
   xem nó *sẽ* xử lý những ai. Xem log ổn rồi mới chuyển sang `ban`.
-- `SPAM_THRESHOLD` (mặc định 5) và `NEW_MEMBER_THRESHOLD` (mặc định 3) — hạ xuống thì gắt hơn.
+- `BLOCK_PHONES` / `BLOCK_MENTIONS` — tắt là tắt hẳn, không còn "phạt nhẹ" nữa.
 - `BLOCK_FORWARDS` / `BLOCK_LINKS` — chặn cứng forward và link lạ. Nếu nhóm bạn hay
   chia sẻ link, đặt `BLOCK_LINKS_NEW_ONLY=true` để chỉ chặn với thành viên mới.
 - `WHITELIST_DOMAINS` — các domain được phép. Áp dụng cho cả link trong QR.
@@ -197,7 +244,7 @@ chắn không chặn oan tin nhắn bình thường.
 .venv\Scripts\python.exe tests\test_qrscan.py
 ```
 
-Kiểm thử QR đầu-cuối: tự tạo ảnh QR, giải mã, rồi chấm điểm. Tự bỏ qua nếu máy không
+Kiểm thử QR đầu-cuối: tự tạo ảnh QR, giải mã, rồi đưa qua bộ luật. Tự bỏ qua nếu
 có OpenCV.
 
 Lần chạy đầu mất khoảng 5–6 giây để biên dịch `.pyc`, các lần sau chỉ hơn 1 giây.
@@ -209,7 +256,9 @@ Lần chạy đầu mất khoảng 5–6 giây để biên dịch `.pyc`, các l
 antispam_bot/
   config.py     đọc .env
   normalize.py  chuẩn hoá text: bỏ dấu, ký tự ẩn, homoglyph, leetspeak
-  detector.py   từ khoá + regex + chấm điểm  ← chỉnh ở đây khi muốn thêm luật
+  detector.py   từ khoá + regex + luật dứt khoát  ← chỉnh ở đây khi muốn thêm luật
+  ngucanh.py    xét ngữ cảnh quanh từ cấm trước khi kết luận
+  raivai.py     chống rải hàng loạt (dồn tin / lặp / phối hợp)
   qrscan.py     giải mã QR trong ảnh (OpenCV, tuỳ chọn)
   storage.py    SQLite: thành viên mới, lịch sử vi phạm, whitelist theo nhóm
   bot.py        handler Telegram, thực thi hình phạt, lệnh quản trị

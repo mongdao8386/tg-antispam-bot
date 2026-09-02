@@ -75,7 +75,6 @@ IMAGE_TOTAL_BUDGET = 30.0
 # 1280px đã thừa cho chữ quảng cáo và mã QR cỡ thường.
 ANH_CAN_IT_NHAT = 1280
 # Cắt đuôi "(+3)" trong lý do khi gửi log - người đọc không cần con số
-_RE_DIEM = re.compile(r"\s*\(\+\d+\)\s*$")
 RULES_CACHE_TTL = 60   # giây - lệnh admin xoá cache ngay nên đây chỉ là lưới an toàn
 SELF_DESTRUCT = 20     # giây - thời gian sống của phản hồi lệnh quản trị
 
@@ -693,9 +692,7 @@ async def _report(
     cfg = _cfg(context)
     if not cfg.log_chat_id:
         return
-    # Bỏ điểm/ngưỡng: luật đã chỉnh chuẩn rồi, đọc log chỉ cần biết ai - vì sao.
-    # Lý do cũng cắt luôn phần "(+3)" cho gọn.
-    ly_do = "; ".join(_RE_DIEM.sub("", r).strip() for r in verdict.reasons)
+    ly_do = "; ".join(verdict.reasons)
     body = (
         f"🛡 <b>{html.escape(action.upper())}</b>\n"
         f"Nhóm: {html.escape(chat.title or str(chat.id))} (<code>{chat.id}</code>)\n"
@@ -982,7 +979,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
     if force_punish:
-        verdict = Verdict(score=9999, reasons=[force_reason], threshold=1)
+        verdict = Verdict(reasons=[force_reason])
     else:
         # rules.cfg đã gộp sẵn whitelist domain + @ của admin nhóm.
         verdict = analyse(facts, rules.cfg)
@@ -1001,7 +998,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else (msg.sender_chat.title if msg.sender_chat else "")
     )
     await db.log_offence(
-        chat.id, uid, verdict.score, action, "; ".join(verdict.reasons),
+        chat.id, uid, len(verdict.reasons), action, "; ".join(verdict.reasons),
         msg.text or msg.caption or "", ten or "",
     )
     await _report(context, chat, msg, verdict, action)
@@ -1197,8 +1194,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "🛡 <b>Trạng thái chống spam</b>\n"
         f"Hành động: <code>{cfg.action}</code>"
         + (f" ({cfg.mute_seconds}s)" if cfg.action == "mute" else "")
-        + f" · ngưỡng <code>{cfg.spam_threshold}</code>"
-        f" (mới: <code>{cfg.new_member_threshold}</code>)\n"
+        + "\n"
         f"Chặn forward: <code>{cfg.block_forwards}</code> · link: <code>{cfg.block_links}</code> · "
         f"kênh: <code>{cfg.block_channel_senders}</code> · "
         f"@: <code>{cfg.block_mentions}</code> · "
@@ -1329,14 +1325,14 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         list_note = f"\n⛔ <b>Chứa từ cấm</b>: <code>{hits}</code> — sẽ bị ban ngay"
         verdict_text = "SPAM (từ cấm)"
     elif is_bl:
-        list_note = "\n⛔ <b>Đang trong danh sách chặn cứng</b> — sẽ bị xử lý bất kể điểm số"
+        list_note = "\n⛔ <b>Đang trong danh sách chặn cứng</b> — sẽ bị xử lý bất kể nội dung"
         verdict_text = "SPAM (chặn cứng)"
     elif is_fwd:
-        list_note = "\n✅ <b>Được phép chuyển tiếp</b> — forward sẽ không bị tính điểm"
+        list_note = "\n✅ <b>Được phép chuyển tiếp</b> — forward sẽ không bị chặn"
     await _quiet_reply(
         update,
         context,
-        f"Kết quả: <b>{verdict_text}</b> — {verdict.score}/{verdict.threshold}\n{reasons}{qr_note}{list_note}",
+        f"Kết quả: <b>{verdict_text}</b>\n{reasons}{qr_note}{list_note}",
     )
 
 

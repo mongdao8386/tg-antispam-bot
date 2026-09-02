@@ -115,8 +115,6 @@ class Config:
 
     action: str = "ban"
     mute_seconds: int = 86400
-    spam_threshold: int = 5
-    new_member_threshold: int = 3
     new_member_hours: int = 24
 
     block_forwards: bool = True
@@ -216,8 +214,6 @@ class Config:
             log_chat_id=log_chat_id,
             action=action,
             mute_seconds=_int("MUTE_SECONDS", 86400),
-            spam_threshold=_int("SPAM_THRESHOLD", 5),
-            new_member_threshold=_int("NEW_MEMBER_THRESHOLD", 3),
             new_member_hours=_int("NEW_MEMBER_HOURS", 24),
             block_forwards=_bool("BLOCK_FORWARDS", True),
             block_forwards_new_only=_bool("BLOCK_FORWARDS_NEW_ONLY", False),

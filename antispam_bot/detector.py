@@ -1,8 +1,27 @@
-"""Bộ dò spam theo điểm.
+"""Bộ dò spam theo luật dứt khoát.
 
-Mỗi dấu hiệu cộng một số điểm; tổng điểm vượt ngưỡng thì tin nhắn bị xử lý.
-Cách chấm điểm (thay vì chặn cứng theo từ khoá) giúp giảm oan sai: một từ
-nhạy cảm đơn lẻ không đủ, nhưng "kèo thơm" + link lạ + tài khoản mới thì đủ.
+Mỗi luật ở đây tự chịu trách nhiệm: khớp là xử lý, không khớp thì thôi. Không
+cộng dồn, không ngưỡng, không "gần đủ điểm".
+
+VÌ SAO BỎ CHẤM ĐIỂM
+Đo trên 1.761 lượt ban thật của chính bot này:
+
+    1.508 lượt (99,4%)  có sẵn MỘT luật đủ mạnh, cộng dồn không thay đổi gì
+       10 lượt ( 0,6%)  thật sự do cộng dồn quyết định
+
+Mười lượt đó gần như đều là ban oan: "số điện thoại + nhiều emoji", "uy tín +
+đã vi phạm 1 lần trước đó". Lớp điểm số không cứu được ca nào mà chỉ thêm oan
+sai, nên bỏ hẳn.
+
+CÁI GIÁ PHẢI TRẢ
+Mỗi luật giờ phải tự đứng vững một mình. Luật nào không đủ chắc để một mình
+kết tội thì không có lý do tồn tại - đã xoá hết ở lần này: lạm dụng emoji,
+viết hoa toàn bộ, nhắc con số tiền, "có vẻ như là mã QR", thành viên mới,
+không có username, đã vi phạm trước đó. Chúng chỉ từng có ý nghĩa khi được
+cộng vào một tổng, mà cái tổng đó vừa chứng minh là vô dụng.
+
+Đổi lại, mỗi lần ban giờ chỉ ra được đúng MỘT lý do đọc hiểu ngay, thay vì
+một danh sách bốn dấu hiệu mơ hồ cộng lại thành 5/5.
 """
 
 from __future__ import annotations
@@ -10,29 +29,50 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from . import ngucanh
 from .config import Config
-from .normalize import normalize, obfuscation_score, squeeze
+from .normalize import INVISIBLE_RE, normalize, squeeze
 
 # --------------------------------------------------------------------------
 # Từ khoá (viết ở dạng đã bỏ dấu, chữ thường - xem normalize.py)
+#
+# Chỉ còn MỘT danh sách. Trước đây có ba mức mạnh/vừa/yếu, nhưng hai mức dưới
+# chỉ tồn tại để cộng điểm - mà cộng điểm thì đã bỏ. Luật ở đây là: cụm nào
+# đủ chắc để một mình kết tội thì giữ, không thì xoá.
+#
+# Đã xoá vì quá chung, người bình thường vẫn nói: "làm giàu", "cơ hội đầu tư",
+# "forex", "tăng ngay", "nhận ngay", "trúng thưởng", "mã khuyến mãi", "ib
+# riêng", "nhắn tin riêng", "uy tín", "cam kết", "nhanh tay", "liên hệ ngay",
+# "lãi suất 0" và toàn bộ nhóm "mồi chài" cũ.
+#
+# Lưu ý về dấu: chuỗi so khớp đã bỏ dấu nên "nổ hũ" và "nó hư" ra cùng một
+# dạng. Những cụm ngắn dễ đụng như vậy đều đã được viết dài ra cho an toàn.
 # --------------------------------------------------------------------------
-
-# Điểm 3: gần như chắc chắn là spam/lừa đảo
-STRONG = {
+_CHAN_GOC = {
     # Việc nhẹ lương cao / tuyển CTV
     "viec nhe luong cao", "tuyen ctv", "tuyen cong tac vien", "ctv online",
     "lam viec tai nha luong", "khong can kinh nghiem luong", "thu nhap khong gioi han",
-    # Cờ bạc
-    "nha cai uy tin", "ca cuoc", "tai xiu", "no hu", "soi cau", "lo de",
-    "keo thom", "chot keo", "dang ky nhan 100k", "hoan tra cao nhat",
-    "game bai doi thuong", "link vao nha cai",
+    "kiem tien online", "kiem tien tai nha", "thu nhap thu dong",
+    "work from home earn", "make money fast", "passive income", "financial freedom",
+    # Cờ bạc  ("nổ hũ", "cá cược" viết dài ra vì bỏ dấu là đụng chữ thường)
+    "nha cai uy tin", "tai xiu", "soi cau", "lo de", "keo thom", "chot keo",
+    "game no hu", "no hu doi thuong", "link no hu",
+    "ca cuoc bong da", "trang ca cuoc", "nha cai ca cuoc", "web ca cuoc",
+    "dang ky nhan 100k", "hoan tra cao nhat", "game bai doi thuong",
+    "link vao nha cai", "code tan thu", "nap rut",
     # Đầu tư / crypto lừa đảo
-    "cam ket loi nhuan", "bao lai", "loi nhuan khung", "sieu loi nhuan",
+    "cam ket loi nhuan", "loi nhuan khung", "sieu loi nhuan", "cam ket bao lai",
     "x2 tai khoan", "x3 tai khoan", "san giao dich uy tin", "tin hieu giao dich",
-    "chot lai lien tuc", "khong lo von", "lai suat 0",
+    "chot lai lien tuc", "khong lo von", "dau tu sinh loi", "von it loi nhieu",
+    "binary option", "san quoc te", "uy tin so 1", "top 1 chau a",
     "guaranteed profit", "guaranteed returns", "double your money",
     "free airdrop", "claim airdrop", "elon musk giveaway", "crypto giveaway",
-    "pump signal", "insider signal",
+    "pump signal", "insider signal", "vip signal", "trading bot profit",
+    "investment opportunity", "join our vip", "join my channel",
+    "recover your funds", "recovery expert", "hack recovery",
+    # Hứa hẹn thu nhập bằng con số cụ thể
+    "bo tui moi ngay", "moi ngay 500k", "moi ngay 1 trieu", "300k ngay", "500k ngay",
+    "hoa hong cao", "rut tien nhanh", "qua tang khung",
     # Vay nặng lãi / tín dụng đen
     "vay tien nhanh", "vay nong", "giai ngan trong ngay", "chi can cmnd",
     "chi can cccd", "ho tro no xau", "vay khong the chap", "alo la co tien",
@@ -45,38 +85,27 @@ STRONG = {
     # Chiếm đoạt tài khoản
     "cung cap ma otp", "gui ma otp", "doc ma otp", "tai khoan cua ban bi khoa",
     "xac minh tai khoan ngay", "nhap thong tin the",
-}
-
-# Điểm 2: đáng ngờ, cần đi kèm dấu hiệu khác
-MEDIUM = {
-    "kiem tien online", "kiem tien tai nha", "thu nhap thu dong", "lam giau",
-    "co hoi dau tu", "dau tu sinh loi", "von it loi nhieu", "hoa hong cao",
-    "rut tien nhanh", "nap rut", "uy tin so 1", "top 1 chau a",
-    "san quoc te", "forex", "binary option", "bo tui moi ngay",
-    "moi ngay 500k", "moi ngay 1 trieu", "300k ngay", "500k ngay",
-    "tang ngay", "nhan ngay", "qua tang khung", "trung thuong",
-    "nhan thuong", "ma khuyen mai", "code tan thu",
+    # Kéo sang kênh riêng để lừa
     "inbox de biet them", "ib de duoc tu van", "lien he zalo",
-    "add zalo", "ket ban zalo", "ib rieng", "nhan tin rieng",
-    "investment opportunity", "passive income", "work from home earn",
-    "make money fast", "financial freedom", "dm me for", "text me on whatsapp",
-    "join my channel", "join our vip", "vip signal", "trading bot profit",
-    "recover your funds", "recovery expert", "hack recovery",
+    "add zalo", "ket ban zalo", "dm me for", "text me on whatsapp",
 }
 
-# Điểm 1: chỉ là gia vị, một mình không đủ để xử lý
-WEAK = {
-    "nhanh tay", "so luong co han", "chi hom nay", "duy nhat hom nay",
-    "lien he ngay", "dang ky ngay", "click vao link", "bam vao link",
-    "truy cap link", "link duoi day", "xem chi tiet tai", "mien phi 100",
-    "cam ket", "uy tin", "bao mat tuyet doi", "rut tien 24 7",
-    "limited time", "act now", "click here", "sign up now", "100 free",
-}
+# Chuẩn hoá chính danh sách bằng đúng hàm dùng cho tin nhắn.
+#
+# Bắt buộc, không phải cho đẹp: normalize() đổi leetspeak "1"->"i", "0"->"o",
+# "3"->"e" trong tin nhắn. Danh sách viết tay thì không qua bước đó, nên
+# "500k ngay" trong tin đã thành "sook ngay" mà từ khoá vẫn là "500k ngay" -
+# sáu cụm có chữ số ("500k ngay", "dang ky nhan 100k", "x3 tai khoan",
+# "top 1 chau a", "moi ngay 1 trieu", "uy tin so 1") chưa từng khớp được lần
+# nào. Cho cả hai bên đi qua cùng một hàm là hết lệch.
+CHAN = {normalize(k) for k in _CHAN_GOC}
 
-# Dạng liền không dấu, bắt kiểu "k i e m t i e n o n l i n e".
-# Chỉ giữ cụm đủ dài để không khớp nhầm khi nối chữ giữa các từ bình thường.
-SQUEEZED_STRONG = {squeeze(k) for k in STRONG if len(squeeze(k)) >= 12}
-SQUEEZED_MEDIUM = {squeeze(k) for k in MEDIUM if len(squeeze(k)) >= 12}
+# Dạng dồn hết khoảng trắng, để bắt kiểu "k i e m t i e n o n l i n e".
+# Tính sẵn một lần lúc nạp module: nhánh này chạy cho MỌI tin sạch, mà
+# squeeze() gọi normalize() bên trong - tính lại 111 lần mỗi tin thì riêng nó
+# đã ngốn hơn 1 ms. Chỉ giữ cụm đủ dài để không khớp nhầm khi nối chữ giữa
+# các từ bình thường.
+SQUEEZED = {squeeze(k): k for k in CHAN if len(squeeze(k)) >= 12}
 
 # --------------------------------------------------------------------------
 # Regex
@@ -148,9 +177,8 @@ FAKE_ADMIN_RE = re.compile(
     r")(?:\s|$)"
 )
 
-EMOJI_RE = re.compile(
-    "[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF⬀-⯿]"
-)
+# Chèn dấu câu giữa từng chữ cái để cắt vụn từ khoá: "l.ừ.a đ.ả.o"
+CAT_VUN_RE = re.compile(r"(?:\w[.\-_*|]){4,}\w")
 
 # QR thanh toán chuẩn EMVCo (VietQR, VNPay, MoMo...): chuỗi bắt đầu bằng
 # "000201", có mã tiền tệ (5303) và/hoặc mã quốc gia (5802VN).
@@ -163,12 +191,6 @@ WALLET_URI_RE = re.compile(
 
 # QR chứa lệnh mở app/kênh Telegram.
 TG_URI_RE = re.compile(r"(?i)^(?:tg://|telegram://)")
-
-MONEY_RE = re.compile(
-    r"(?i)\b\d{2,4}\s*(?:k|m|usd|\$)\b"          # 500k, 100 usd
-    r"|\b\d{1,4}\s*(?:tr|trieu|triệu|củ|cu)\b"    # 1 triệu, 5 củ
-    r"|[$₫]\s*\d{3,}"                              # $1000
-)
 
 
 # --------------------------------------------------------------------------
@@ -209,63 +231,23 @@ class MessageFacts:
 
 @dataclass
 class Verdict:
-    score: int = 0
+    """Kết luận cho một tin nhắn: danh sách lý do bị chặn.
+
+    Rỗng nghĩa là sạch. Không rỗng nghĩa là bị xử lý - không có mức lưng chừng.
+    """
+
     reasons: list[str] = field(default_factory=list)
-    threshold: int = 0
-    # Có dấu hiệu nào một mình đã đủ chắc để ban không (QR chuyển tiền, ví
-    # crypto...). Xem nen_ban.
-    chac_chan: bool = False
-    # Số dấu hiệu nói về NỘI DUNG tin nhắn (không tính bối cảnh người gửi).
-    so_noi_dung: int = 0
 
-    def add(self, points: int, reason: str, chac_chan: bool = False,
-            boi_canh: bool = False) -> None:
-        """Cộng điểm cho một dấu hiệu.
-
-        chac_chan=True: dấu hiệu gần như không thể nhầm, một mình đủ để ban.
-        boi_canh=True : nói về NGƯỜI GỬI chứ không phải nội dung tin nhắn
-                        (thành viên mới, không có username, từng vi phạm).
-                        Vẫn cộng điểm nhưng KHÔNG tính là bằng chứng độc lập.
-
-        Vì sao phải tách bối cảnh: đo trên dữ liệu thật, tổ hợp hay gặp nhất là
-            "link lạ" + "thành viên mới gửi link" + "không username gửi link"
-        Nhìn thì tưởng ba bằng chứng, thực ra chỉ MỘT sự việc - một người mới
-        đăng một cái link. Hai cái sau chỉ là hệ quả của cái đầu. Đếm cả ba
-        thành ba bằng chứng là tự tin giả, và đó là nguồn ban oan.
-        """
-        if points <= 0:
-            return
-        self.score += points
-        self.reasons.append(f"{reason} (+{points})")
-        self.chac_chan = self.chac_chan or chac_chan
-        if not boi_canh:
-            self.so_noi_dung += 1
+    def chan(self, ly_do: str) -> None:
+        """Ghi nhận một luật đã khớp. Mỗi luật ở đây tự nó đủ để kết tội."""
+        self.reasons.append(ly_do)
 
     @property
     def is_spam(self) -> bool:
-        """Đủ điểm để XOÁ tin nhắn."""
-        return self.score >= self.threshold
-
-    @property
-    def nen_ban(self) -> bool:
-        """Đủ chắc để BAN người gửi, chứ không chỉ xoá tin.
-
-        Vì sao tách hai mức: đo trên 1.759 lượt ban thật thì 31% chỉ dựa vào
-        MỘT dấu hiệu duy nhất - và đó chính là nguồn ban oan. Một dấu hiệu đơn
-        lẻ rất dễ sai (OCR đọc nhầm, từ đồng âm, ảnh chụp màn hình bình
-        thường), nhưng hai dấu hiệu độc lập cùng chỉ vào một tin thì hiếm khi
-        cùng sai.
-
-        Xoá nhầm một tin thì phiền chút; ban nhầm một người thì mất người đó
-        và phải gỡ tay.
-
-        Chỉ đếm dấu hiệu về NỘI DUNG - bối cảnh người gửi không được tính,
-        xem giải thích ở add().
-        """
-        return self.chac_chan or self.so_noi_dung >= 2
+        return bool(self.reasons)
 
     def summary(self) -> str:
-        return f"{self.score}/{self.threshold} · " + "; ".join(self.reasons)
+        return "; ".join(self.reasons) or "sạch"
 
 
 def _hostname(url: str) -> str:
@@ -294,11 +276,6 @@ def _host_matches(host: str, pattern: str) -> bool:
     return host == pattern or host.endswith("." + pattern)
 
 
-def _is_whitelisted(host: str, whitelist: set[str]) -> bool:
-    """Chỉ xét tên miền. Mục whitelist có đường dẫn không tính ở đây."""
-    return any(_host_matches(host, d) for d in whitelist if "/" not in d)
-
-
 def _url_allowed(url: str, whitelist: set[str]) -> bool:
     """URL có được phép không, xét cả đường dẫn.
 
@@ -322,104 +299,100 @@ def _url_allowed(url: str, whitelist: set[str]) -> bool:
     return False
 
 
-def _count_keywords(haystack: str, squeezed: str, verdict: Verdict) -> None:
-    for weight, bucket, label in ((3, STRONG, "từ khoá lừa đảo"), (2, MEDIUM, "từ khoá đáng ngờ"), (1, WEAK, "từ khoá mồi chài")):
-        hits = [k for k in bucket if k in haystack]
-        if not hits:
-            continue
-        # Nhiều từ cùng nhóm chỉ cộng thêm 1 điểm mỗi từ để tránh phóng đại.
-        points = weight + min(len(hits) - 1, 2)
-        verdict.add(points, f"{label}: {', '.join(sorted(hits)[:3])}")
+def _khop_tu_khoa(haystack: str, squeezed: str) -> list[str]:
+    """Những cụm trong CHAN xuất hiện trong tin nhắn.
 
-    # Bắt trường hợp chèn khoảng trắng/ký tự giữa từng chữ cái.
-    if not any(k in haystack for k in STRONG) and any(k in squeezed for k in SQUEEZED_STRONG):
-        verdict.add(3, "từ khoá lừa đảo bị làm nhiễu")
-    elif not any(k in haystack for k in MEDIUM) and any(k in squeezed for k in SQUEEZED_MEDIUM):
-        verdict.add(2, "từ khoá đáng ngờ bị làm nhiễu")
+    So khớp theo RANH GIỚI TỪ chứ không phải chuỗi con: đệm khoảng trắng hai
+    đầu rồi tìm " cum tu ". normalize() đã biến mọi dấu câu thành khoảng trắng
+    nên cách này bắt được cả "…nạp rút!" lẫn "(nạp rút)", mà không khớp nhầm
+    vào giữa một từ dài hơn.
+    """
+    dem = f" {haystack} "
+    hits = [k for k in CHAN if f" {k} " in dem]
+    if hits:
+        return hits
+    # Không thấy dạng thường thì thử dạng dồn chữ: "k i e m t i e n o n l i n e".
+    return [goc for nen, goc in SQUEEZED.items() if nen in squeezed]
 
 
 def analyse(facts: MessageFacts, cfg: Config) -> Verdict:
-    threshold = cfg.new_member_threshold if facts.is_new_member else cfg.spam_threshold
-    v = Verdict(threshold=max(1, threshold))
+    v = Verdict()
 
     text = facts.text or ""
     # Nội dung QR và chữ OCR trong ảnh cũng được soi từ khoá như chữ tin nhắn.
-    # Riêng `text` (dùng cho luật link/@/số tài khoản) thì giữ nguyên bản gốc.
+    # Riêng `text` (dùng cho luật link/@) thì giữ nguyên bản gốc.
     scannable = " ".join([text, *facts.qr_payloads, facts.ocr_text]).strip()
     haystack = normalize(scannable)
     squeezed = squeeze(scannable)
 
     # --- Từ khoá ---
-    # Câu hỏi thuần chữ thì bỏ qua hẳn phần từ khoá: hỏi "có lừa đảo không?"
-    # không phải là quảng cáo lừa đảo. Các luật khác vẫn chạy bình thường.
+    # Câu hỏi thuần chữ thì bỏ qua hẳn phần từ khoá: hỏi "có nhà cái uy tín
+    # không?" không phải là quảng cáo nhà cái. Các luật khác vẫn chạy.
     if haystack and not facts.is_question:
-        _count_keywords(haystack, squeezed, v)
+        khop = _khop_tu_khoa(haystack, squeezed)
+        if khop:
+            # Khớp chuỗi thôi chưa đủ - xét xem người viết đang nhắm vào ai:
+            # quảng cáo, hay chỉ kể chuyện / trích tin / đặt câu hỏi. Dùng
+            # chung bộ xét ngữ cảnh với danh sách từ cấm tự đặt.
+            that_su, _ = ngucanh.loc(scannable, khop)
+            if that_su:
+                v.chan(f"từ khoá lừa đảo: {', '.join(sorted(that_su)[:3])}")
 
     # --- Chuyển tiếp ---
-    if facts.is_forward:
-        block_fwd = cfg.block_forwards and (not cfg.block_forwards_new_only or facts.is_new_member)
-        label = f" từ {facts.forward_label}" if facts.forward_label else ""
-        if not block_fwd:
-            v.add(1, "tin nhắn chuyển tiếp")
-        elif facts.has_media and not facts.has_qr:
-            # Chuyển tiếp kèm ảnh: ảnh đã được soi QR và đọc chữ ở trên. Nếu
-            # có gì xấu thì các luật khác đã cộng điểm rồi. Ảnh sạch thì đừng
-            # ban chỉ vì nó là forward - chia sẻ ảnh là chuyện bình thường.
-            v.add(1, f"chuyển tiếp kèm ảnh{label} (ảnh đã soi, không thấy QR)")
-        else:
-            v.add(v.threshold, f"tin nhắn chuyển tiếp{label}")
+    # Chỉ chặn khi công tắc đang bật. Forward kèm ảnh thì tha: ảnh đã được soi
+    # QR và đọc chữ ở trên, có gì xấu thì luật khác đã bắt rồi - chia sẻ ảnh là
+    # chuyện bình thường, không đáng ban.
+    if facts.is_forward and cfg.block_forwards:
+        if not cfg.block_forwards_new_only or facts.is_new_member:
+            if not (facts.has_media and not facts.has_qr):
+                nhan = f" từ {facts.forward_label}" if facts.forward_label else ""
+                v.chan(f"tin nhắn chuyển tiếp{nhan}")
 
     # --- Gửi dưới danh nghĩa kênh ---
     if facts.from_channel and cfg.block_channel_senders:
-        v.add(v.threshold, "gửi dưới danh nghĩa kênh/nhóm khác")
+        v.chan("gửi dưới danh nghĩa kênh/nhóm khác")
 
     # --- Link ---
     urls = {u for u in (URL_RE.findall(text) + facts.entity_urls) if u}
     hosts = {h for h in (_hostname(u) for u in urls) if h and "." in h}
     # Xét cả đường dẫn: whitelist "t.me/kenh-a" không mở luôn "t.me/kenh-b".
     unknown_urls = {u for u in urls if not _url_allowed(u, cfg.whitelist_domains)}
-    unknown_hosts = {h for h in (_hostname(u) for u in unknown_urls) if h and "." in h}
 
-    if unknown_urls:
-        block_link = cfg.block_links and (not cfg.block_links_new_only or facts.is_new_member)
-
+    if unknown_urls and cfg.block_links and (
+        not cfg.block_links_new_only or facts.is_new_member
+    ):
         def _short(u: str) -> str:
             host, path = _split_url(u)
             return f"{host}/{path}" if path else host
 
         preview = ", ".join(sorted({_short(u) for u in unknown_urls})[:3])
-        if block_link:
-            v.add(v.threshold, f"link lạ: {preview}")
-        else:
-            v.add(2, f"link lạ: {preview}")
+        v.chan(f"link lạ: {preview}")
 
+    # Ba luật dưới đây chạy kể cả khi đã tắt chặn link: chúng không nói "có
+    # link" mà nói "link này cố tình giấu đích đến".
     if any(h in SHORTENERS for h in hosts):
-        v.add(3, "link rút gọn")
-    if any(h.rsplit(".", 1)[-1] in SUSPICIOUS_TLDS for h in hosts):
-        v.add(2, "tên miền thuộc nhóm rủi ro cao")
+        v.chan("link rút gọn (giấu đích đến)")
+    elif any(h.rsplit(".", 1)[-1] in SUSPICIOUS_TLDS for h in hosts):
+        v.chan("tên miền thuộc nhóm rủi ro cao")
     if INVITE_RE.search(text):
-        v.add(3, "link mời vào nhóm/kênh riêng")
+        v.chan("link mời vào nhóm/kênh riêng")
     if OBFUSCATED_URL_RE.search(text) and not hosts:
-        v.add(3, "link viết né bộ lọc (dạng 'abc (dot) com')")
+        v.chan("link viết né bộ lọc (dạng 'abc (dot) com')")
 
     # --- Mã QR trong ảnh ---
-    # Chỉ tính khi ĐỌC ĐƯỢC nội dung. "Có vẻ như là khung QR" không phải bằng
-    # chứng: bộ dò nhận nhầm hoa văn ảnh đời thường (đĩa cơm, vân vải) rất nhiều.
-    if facts.has_qr and facts.qr_payloads:
-        v.add(2, "ảnh có chứa mã QR")
-        if facts.is_new_member:
-            v.add(2, "thành viên mới gửi mã QR")
-
+    # CỐ Ý không có luật "ảnh này có mã QR". Đã thử và bỏ: bộ dò nhận nhầm hoa
+    # văn ảnh đời thường (đĩa cơm, vân vải) rất nhiều, mà một mã QR đọc được
+    # dẫn tới trang lành thì chẳng có gì sai. Chỉ chặn theo NỘI DUNG mã.
     for payload in facts.qr_payloads:
         p = payload.strip()
         if EMV_QR_RE.match(p):
-            v.add(v.threshold, "QR chuyển khoản / thanh toán ngân hàng", chac_chan=True)
+            v.chan("QR chuyển khoản / thanh toán ngân hàng")
             continue
         if WALLET_URI_RE.match(p) or CRYPTO_RE.search(p):
-            v.add(v.threshold, "QR chứa địa chỉ ví crypto", chac_chan=True)
+            v.chan("QR chứa địa chỉ ví crypto")
             continue
         if INVITE_RE.search(p) or TG_URI_RE.match(p):
-            v.add(v.threshold, "QR dẫn tới nhóm/kênh Telegram")
+            v.chan("QR dẫn tới nhóm/kênh Telegram")
             continue
 
         qr_urls = {u for u in URL_RE.findall(p) if _hostname(u) and "." in _hostname(u)}
@@ -428,29 +401,25 @@ def analyse(facts: MessageFacts, cfg: Config) -> Verdict:
         unknown_qr = {u for u in qr_urls if not _url_allowed(u, cfg.whitelist_domains)}
         if unknown_qr:
             names = sorted({_hostname(u) for u in unknown_qr})[:2]
-            v.add(v.threshold, f"QR dẫn tới link lạ: {', '.join(names)}")
-        elif qr_urls:
-            v.add(1, "QR dẫn tới link đã whitelist")
+            v.chan(f"QR dẫn tới link lạ: {', '.join(names)}")
 
     # --- Nhắc @username ---
     # Gom cả entity do Telegram nhận diện lẫn @ viết thẳng trong chữ.
-    handles = {m.strip().lstrip("@").lower() for m in facts.mentions}
-    handles |= {m.lower() for m in MENTION_RE.findall(text)}
-    handles = {h for h in handles if h}
-    unknown_ats = {h for h in handles if h not in cfg.allowed_usernames}
+    # CỐ Ý không còn luật "nhắc tới từ 3 tài khoản trở lên": tag ba người bạn
+    # vào một tin là chuyện thường ngày.
+    if cfg.block_mentions:
+        handles = {m.strip().lstrip("@").lower() for m in facts.mentions}
+        handles |= {m.lower() for m in MENTION_RE.findall(text)}
+        la = {h for h in handles if h and h not in cfg.allowed_usernames}
+        if la:
+            preview = ", ".join("@" + h for h in sorted(la)[:3])
+            v.chan(f"nhắc @ không được phép: {preview}")
 
-    if unknown_ats and cfg.block_mentions:
-        preview = ", ".join("@" + h for h in sorted(unknown_ats)[:3])
-        v.add(v.threshold, f"nhắc @ không được phép: {preview}")
-    elif len(handles) >= 3:
-        v.add(2, f"nhắc tới {len(handles)} tài khoản/kênh")
-
-    # --- Dấu hiệu tài chính ---
+    # --- Ví crypto ---
     # Quét trên `scannable` (gồm cả chữ đọc từ ảnh và nội dung QR), không chỉ
-    # chữ tin nhắn: kẻ spam đã chuyển sang gửi ẢNH CẮT chỉ còn số tài khoản,
-    # không QR không link không chữ, nên chỉ soi text là mù hoàn toàn.
+    # chữ tin nhắn: kẻ spam đã chuyển sang gửi ẢNH CẮT chỉ còn địa chỉ ví.
     if CRYPTO_RE.search(scannable):
-        v.add(v.threshold, "địa chỉ ví crypto", chac_chan=True)
+        v.chan("địa chỉ ví crypto")
 
     # CỐ Ý KHÔNG có luật nào bắt số tài khoản / tên ngân hàng / ảnh biên lai.
     #
@@ -462,21 +431,17 @@ def analyse(facts: MessageFacts, cfg: Config) -> Verdict:
     #
     # QR mới là thứ đáng chặn: mã VietQR/EMV chuyển thẳng tiền đi được, và
     # người dùng thường không đăng QR thanh toán của mình trong nhóm chat.
-    # Xem mục "Mã QR trong ảnh" bên dưới.
 
-    # Số điện thoại: quét cả chữ trong ảnh, vì tờ rơi quảng cáo luôn in số
-    # liên hệ lên ảnh chứ không gõ vào tin nhắn.
-    phones = {
-        re.sub(r"[\s.\-]", "", p) for p in PHONE_RE.findall(scannable)
-    }
-    phones = {p for p in phones if p not in cfg.allowed_phones}
-    if phones:
-        if cfg.block_phones:
-            v.add(v.threshold, f"số điện thoại lạ: {', '.join(sorted(phones)[:2])}")
-        elif haystack or urls:
-            v.add(2, "số điện thoại liên hệ")
-    if MONEY_RE.search(text):
-        v.add(1, "hứa hẹn thu nhập bằng con số")
+    # --- Số điện thoại ---
+    # Quét cả chữ trong ảnh, vì tờ rơi quảng cáo luôn in số liên hệ lên ảnh
+    # chứ không gõ vào tin nhắn. Chỉ chạy khi công tắc bật - trước đây còn một
+    # nhánh "số điện thoại liên hệ" cộng 2 điểm khi công tắc TẮT, tức là tắt
+    # mà vẫn phạt. Đó là một trong những nguồn ban oan, đã xoá.
+    if cfg.block_phones:
+        phones = {re.sub(r"[\s.\-]", "", p) for p in PHONE_RE.findall(scannable)}
+        phones -= cfg.allowed_phones
+        if phones:
+            v.chan(f"số điện thoại lạ: {', '.join(sorted(phones)[:2])}")
 
     # --- Giả mạo ban quản trị ---
     # Đặt tên "Trợ lý", "QTV", "Admin" mà không phải admin thật là chiêu dụ
@@ -485,46 +450,39 @@ def analyse(facts: MessageFacts, cfg: Config) -> Verdict:
     if cfg.block_fake_admin and not facts.is_real_admin and facts.sender_name:
         # normalize() bỏ dấu và gộp ký tự lạ về khoảng trắng, nên bắt được cả
         # "Trợ Lý", "TRO LY", và cả tên trang trí kiểu 𝓣𝓻𝓸̛̣ 𝓛𝔂́.
-        ten_chuan = f" {normalize(facts.sender_name)} "
-        khop = FAKE_ADMIN_RE.search(ten_chuan)
+        khop = FAKE_ADMIN_RE.search(f" {normalize(facts.sender_name)} ")
         if khop:
-            v.add(v.threshold, f"tên giả mạo ban quản trị: {khop.group(0).strip()!r}")
+            v.chan(f"tên giả mạo ban quản trị: {khop.group(0).strip()!r}")
+
+    # --- Cố tình né bộ lọc ---
+    # Chỉ giữ hai dấu hiệu KHÔNG THỂ vô tình: ký tự vô hình chèn giữa chữ, và
+    # dấu câu cắt vụn từng chữ cái ("l.ừ.a đ.ả.o"). Người viết bình thường
+    # không bao giờ làm hai việc này.
+    #
+    # Đã bỏ luật "chữ giả Latin": nó bắt cả tin nhắn tiếng Nga hay tên trang
+    # trí, mà normalize() vốn đã quy homoglyph về chữ Latin rồi - từ khoá viết
+    # bằng chữ Cyrillic vẫn bị các luật trên bắt bình thường.
+    if INVISIBLE_RE.search(text):
+        v.chan("chèn ký tự vô hình để né bộ lọc")
+    elif CAT_VUN_RE.search(text):
+        v.chan("cắt vụn chữ bằng dấu câu để né bộ lọc")
 
     # --- Hình thức ---
-    v.add(obfuscation_score(text), "ký tự ẩn / chữ giả Latin")
-
-    letters = [c for c in text if c.isalpha()]
-    if len(letters) >= 25:
-        caps_ratio = sum(1 for c in letters if c.isupper()) / len(letters)
-        if caps_ratio > 0.7:
-            v.add(1, "viết hoa toàn bộ")
-
-    emoji_count = len(EMOJI_RE.findall(text))
-    if emoji_count >= 8:
-        v.add(2, f"lạm dụng emoji ({emoji_count})")
-    elif emoji_count >= 5:
-        v.add(1, f"nhiều emoji ({emoji_count})")
-
+    # CỐ Ý không còn luật "viết hoa toàn bộ" và "lạm dụng emoji". Cả hai chưa
+    # bao giờ tự kết tội được ai, chỉ góp điểm - và chúng có mặt trong hầu hết
+    # những lần ban oan đo được.
     if facts.has_story:
         # Story không để lại nội dung nào soi được (nhất là khi đã hết hạn),
-        # nên không chấm điểm được - chỉ có tác dụng kéo người sang tài khoản
-        # khác. Chặn thẳng.
-        v.add(v.threshold, "tin chia sẻ story")
+        # nên chỉ có tác dụng kéo người sang tài khoản khác.
+        v.chan("tin chia sẻ story")
     if facts.has_buttons:
-        v.add(3, "tin nhắn kèm nút bấm (dấu hiệu bot spam)")
-    if facts.via_bot:
-        v.add(1, "gửi qua inline bot")
+        v.chan("tin nhắn kèm nút bấm (dấu hiệu bot spam)")
 
-    # --- Bối cảnh người gửi ---
-    if facts.is_new_member and (unknown_hosts or facts.is_forward):
-        v.add(1, "thành viên mới đã gửi link/forward", boi_canh=True)
-    if facts.is_new_member and not facts.has_username and urls:
-        v.add(1, "tài khoản không username gửi link", boi_canh=True)
-    # Tiền án chỉ LÀM NẶNG THÊM tin đã có dấu hiệu khác, không tự nó kết tội.
-    # Nếu không có điều kiện này, người từng vi phạm sẽ bị ban vì cả tin nhắn
-    # hoàn toàn sạch - kể cả link đã nằm trong whitelist.
-    if facts.prior_offences and v.score > 0:
-        v.add(min(facts.prior_offences * 2, 4),
-              f"đã vi phạm {facts.prior_offences} lần trước đó", boi_canh=True)
+    # CỐ Ý không còn luật nào về BỐI CẢNH NGƯỜI GỬI - thành viên mới, không có
+    # username, đã từng vi phạm. Chúng không nói gì về tin nhắn này, chỉ nói về
+    # người gửi; dùng chúng để kết tội nghĩa là phạt người vì lý lịch. Khi còn
+    # chấm điểm, tổ hợp hay gặp nhất là "link lạ + thành viên mới gửi link +
+    # không username gửi link" - nhìn tưởng ba bằng chứng, thực ra là một sự
+    # việc đếm ba lần. Đó là tự tin giả, và là nguồn ban oan lớn nhất.
 
     return v

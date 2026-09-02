@@ -75,23 +75,6 @@ def squeeze(text: str) -> str:
     return normalize(text).replace(" ", "")
 
 
-def obfuscation_score(text: str) -> int:
-    """Điểm cho dấu hiệu cố tình né bộ lọc."""
-    if not text:
-        return 0
-    score = 0
-    if INVISIBLE_RE.search(text):
-        score += 3
-    latin = sum(1 for ch in text if "a" <= ch.lower() <= "z")
-    fake_latin = sum(1 for ch in text.lower() if ord(ch) in HOMOGLYPHS)
-    if fake_latin and fake_latin >= max(2, latin // 10):
-        score += 3
-    # Chèn dấu câu giữa từng chữ cái: "l.ừ.a đ.ả.o"
-    if re.search(r"(?:\w[.\-_*|]){4,}\w", text):
-        score += 2
-    return score
-
-
 # Dấu hiệu người dùng đang HỎI chứ không khẳng định. Người vào nhóm hỏi
 # "nhóm này có uy tín không?" là người cẩn thận, không phải kẻ phá hoại -
 # ban họ là mất người dùng thật.

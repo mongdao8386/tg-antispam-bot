@@ -73,7 +73,7 @@ async def run() -> int:
         failures += not ok
         verdict = "CHẶN" if v.is_spam else "cho qua"
         expect = "CHẶN" if should_block else "cho qua"
-        print(f"  [{'OK ' if ok else 'FAIL'}] giải OK, {verdict} ({v.score}/{v.threshold}) "
+        print(f"  [{'OK ' if ok else 'FAIL'}] giải OK, {verdict} ({v.summary()[:40]}) "
               f"| mong đợi {expect} | {payload[:45]}")
         if not ok:
             print(f"         lý do: {v.reasons}")
