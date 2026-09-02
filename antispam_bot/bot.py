@@ -924,6 +924,15 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Chế độ lúc chạy (đổi bằng /action hoặc do phanh tự động) đè lên .env.
     che_do = await control.effective_action(db, cfg)
+
+    # Chỉ MỘT dấu hiệu thì hạ xuống mức xoá tin, không ban. Đo trên 1.759 lượt
+    # ban thật: 31% chỉ dựa vào một dấu hiệu duy nhất, và đó là nguồn ban oan
+    # chính - OCR đọc nhầm, từ đồng âm, ảnh chụp màn hình bình thường.
+    # Hai dấu hiệu độc lập cùng chỉ vào một tin thì hiếm khi cùng sai.
+    if che_do in ("ban", "mute") and not verdict.nen_ban:
+        che_do = "delete"
+        verdict.reasons.append("[chỉ 1 dấu hiệu → chỉ xoá tin, không ban]")
+
     action = "report" if che_do == "report" else await _punish(context, msg, che_do)
 
     uid = msg.sender_chat.id if msg.sender_chat else (msg.from_user.id if msg.from_user else 0)

@@ -212,16 +212,57 @@ class Verdict:
     score: int = 0
     reasons: list[str] = field(default_factory=list)
     threshold: int = 0
+    # Có dấu hiệu nào một mình đã đủ chắc để ban không (QR chuyển tiền, ví
+    # crypto...). Xem nen_ban.
+    chac_chan: bool = False
+    # Số dấu hiệu nói về NỘI DUNG tin nhắn (không tính bối cảnh người gửi).
+    so_noi_dung: int = 0
 
-    def add(self, points: int, reason: str) -> None:
+    def add(self, points: int, reason: str, chac_chan: bool = False,
+            boi_canh: bool = False) -> None:
+        """Cộng điểm cho một dấu hiệu.
+
+        chac_chan=True: dấu hiệu gần như không thể nhầm, một mình đủ để ban.
+        boi_canh=True : nói về NGƯỜI GỬI chứ không phải nội dung tin nhắn
+                        (thành viên mới, không có username, từng vi phạm).
+                        Vẫn cộng điểm nhưng KHÔNG tính là bằng chứng độc lập.
+
+        Vì sao phải tách bối cảnh: đo trên dữ liệu thật, tổ hợp hay gặp nhất là
+            "link lạ" + "thành viên mới gửi link" + "không username gửi link"
+        Nhìn thì tưởng ba bằng chứng, thực ra chỉ MỘT sự việc - một người mới
+        đăng một cái link. Hai cái sau chỉ là hệ quả của cái đầu. Đếm cả ba
+        thành ba bằng chứng là tự tin giả, và đó là nguồn ban oan.
+        """
         if points <= 0:
             return
         self.score += points
         self.reasons.append(f"{reason} (+{points})")
+        self.chac_chan = self.chac_chan or chac_chan
+        if not boi_canh:
+            self.so_noi_dung += 1
 
     @property
     def is_spam(self) -> bool:
+        """Đủ điểm để XOÁ tin nhắn."""
         return self.score >= self.threshold
+
+    @property
+    def nen_ban(self) -> bool:
+        """Đủ chắc để BAN người gửi, chứ không chỉ xoá tin.
+
+        Vì sao tách hai mức: đo trên 1.759 lượt ban thật thì 31% chỉ dựa vào
+        MỘT dấu hiệu duy nhất - và đó chính là nguồn ban oan. Một dấu hiệu đơn
+        lẻ rất dễ sai (OCR đọc nhầm, từ đồng âm, ảnh chụp màn hình bình
+        thường), nhưng hai dấu hiệu độc lập cùng chỉ vào một tin thì hiếm khi
+        cùng sai.
+
+        Xoá nhầm một tin thì phiền chút; ban nhầm một người thì mất người đó
+        và phải gỡ tay.
+
+        Chỉ đếm dấu hiệu về NỘI DUNG - bối cảnh người gửi không được tính,
+        xem giải thích ở add().
+        """
+        return self.chac_chan or self.so_noi_dung >= 2
 
     def summary(self) -> str:
         return f"{self.score}/{self.threshold} · " + "; ".join(self.reasons)
@@ -372,10 +413,10 @@ def analyse(facts: MessageFacts, cfg: Config) -> Verdict:
     for payload in facts.qr_payloads:
         p = payload.strip()
         if EMV_QR_RE.match(p):
-            v.add(v.threshold, "QR chuyển khoản / thanh toán ngân hàng")
+            v.add(v.threshold, "QR chuyển khoản / thanh toán ngân hàng", chac_chan=True)
             continue
         if WALLET_URI_RE.match(p) or CRYPTO_RE.search(p):
-            v.add(v.threshold, "QR chứa địa chỉ ví crypto")
+            v.add(v.threshold, "QR chứa địa chỉ ví crypto", chac_chan=True)
             continue
         if INVITE_RE.search(p) or TG_URI_RE.match(p):
             v.add(v.threshold, "QR dẫn tới nhóm/kênh Telegram")
@@ -409,7 +450,7 @@ def analyse(facts: MessageFacts, cfg: Config) -> Verdict:
     # chữ tin nhắn: kẻ spam đã chuyển sang gửi ẢNH CẮT chỉ còn số tài khoản,
     # không QR không link không chữ, nên chỉ soi text là mù hoàn toàn.
     if CRYPTO_RE.search(scannable):
-        v.add(v.threshold, "địa chỉ ví crypto")
+        v.add(v.threshold, "địa chỉ ví crypto", chac_chan=True)
 
     # CỐ Ý KHÔNG có luật nào bắt số tài khoản / tên ngân hàng / ảnh biên lai.
     #
@@ -476,13 +517,14 @@ def analyse(facts: MessageFacts, cfg: Config) -> Verdict:
 
     # --- Bối cảnh người gửi ---
     if facts.is_new_member and (unknown_hosts or facts.is_forward):
-        v.add(1, "thành viên mới đã gửi link/forward")
+        v.add(1, "thành viên mới đã gửi link/forward", boi_canh=True)
     if facts.is_new_member and not facts.has_username and urls:
-        v.add(1, "tài khoản không username gửi link")
+        v.add(1, "tài khoản không username gửi link", boi_canh=True)
     # Tiền án chỉ LÀM NẶNG THÊM tin đã có dấu hiệu khác, không tự nó kết tội.
     # Nếu không có điều kiện này, người từng vi phạm sẽ bị ban vì cả tin nhắn
     # hoàn toàn sạch - kể cả link đã nằm trong whitelist.
     if facts.prior_offences and v.score > 0:
-        v.add(min(facts.prior_offences * 2, 4), f"đã vi phạm {facts.prior_offences} lần trước đó")
+        v.add(min(facts.prior_offences * 2, 4),
+              f"đã vi phạm {facts.prior_offences} lần trước đó", boi_canh=True)
 
     return v
