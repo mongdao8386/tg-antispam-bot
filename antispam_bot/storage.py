@@ -6,6 +6,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+from .vantay import cac_bang, giong_nhau, lech, sang_sqlite, tu_sqlite
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS members (
     chat_id     INTEGER NOT NULL,
@@ -87,6 +89,40 @@ CREATE TABLE IF NOT EXISTS keyword_blacklist (
     chat_id INTEGER NOT NULL,
     phrase  TEXT    NOT NULL,
     PRIMARY KEY (chat_id, phrase)
+);
+
+-- Bộ nhớ nội dung, dùng cho luật "nhiều tài khoản cùng đăng một bài".
+-- Cố ý KHÔNG có chat_id ở bảng noi_dung: chiến dịch rải trải khắp mọi nhóm,
+-- đếm riêng từng nhóm là mù trước đúng thứ nguy hiểm nhất.
+CREATE TABLE IF NOT EXISTS noi_dung (
+    van_tay  INTEGER PRIMARY KEY,
+    mau      TEXT    NOT NULL DEFAULT '',
+    lan_cuoi INTEGER NOT NULL
+);
+
+-- Ai đã đăng bài đó, ở nhóm nào. Khoá chính (van_tay, user_id) nên một người
+-- đăng lại mười lần vẫn chỉ tính là một tài khoản.
+CREATE TABLE IF NOT EXISTS noi_dung_acc (
+    van_tay INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    ts      INTEGER NOT NULL,
+    PRIMARY KEY (van_tay, user_id)
+);
+
+-- Chỉ mục băng, để tra vân tay GẦN GIỐNG mà không phải quét cả bảng.
+-- Xem giải thích nguyên lý chuồng bồ câu trong vantay.py.
+CREATE TABLE IF NOT EXISTS noi_dung_bang (
+    bang    INTEGER NOT NULL,
+    khoa    INTEGER NOT NULL,
+    van_tay INTEGER NOT NULL,
+    PRIMARY KEY (bang, khoa, van_tay)
+);
+
+-- Nội dung admin đã tha: nhóm có thể có bài đăng lặp lại hợp lệ (nội quy,
+-- thông báo định kỳ) mà nhiều người cùng chép lại.
+CREATE TABLE IF NOT EXISTS noi_dung_tha (
+    van_tay INTEGER PRIMARY KEY
 );
 """
 
@@ -669,3 +705,142 @@ class Storage:
 
     async def count_keywords(self, chat_id: int) -> int:
         return await self._run(self._count_keywords, chat_id)
+
+    # -- bộ nhớ nội dung (chống rải xuyên nhóm) ----------------------------
+
+    # Mỗi băng chỉ tra tối đa bấy nhiêu dòng. Chặn trường hợp một khoá băng
+    # bị dồn quá nhiều nội dung làm chậm mọi tin nhắn.
+    _TRAN_UNG_VIEN = 200
+
+    def _tim_gan_giong(self, vt: int) -> int | None:
+        """Vân tay đã có nào gần giống vt nhất? None nếu chưa từng thấy."""
+        # Một truy vấn cho cả 8 băng, không phải 8 lượt: đo được nhanh hơn 3
+        # lần, vì mỗi lượt gọi SQLite đều mất chi phí cố định.
+        bang = cac_bang(vt)
+        cho = ",".join(["(?,?)"] * len(bang))
+        tham: list[int] = []
+        for b, k in bang:
+            tham += [b, k]
+        cur = self._conn.execute(
+            f"SELECT DISTINCT van_tay FROM noi_dung_bang WHERE (bang,khoa) IN"
+            f" (VALUES {cho}) LIMIT ?",
+            (*tham, self._TRAN_UNG_VIEN),
+        )
+        ung_vien = {tu_sqlite(v) for (v,) in cur}
+        gan = [u for u in ung_vien if giong_nhau(vt, u)]
+        return min(gan, key=lambda u: lech(vt, u)) if gan else None
+
+    def _ghi_noi_dung(
+        self, vt: int, mau: str, user_id: int, chat_id: int
+    ) -> tuple[int, int]:
+        """Ghi nhận một lần đăng. Trả về (vân tay gộp, số tài khoản đã đăng).
+
+        Bài gần giống bài đã có thì gộp vào vân tay cũ, nên kẻ spam xào lại
+        vài chữ mỗi lần đăng vẫn bị đếm chung một chiến dịch.
+        """
+        now = int(time.time())
+        chinh = self._tim_gan_giong(vt)
+        if chinh is None:
+            chinh = vt
+            self._conn.execute(
+                "INSERT OR IGNORE INTO noi_dung (van_tay, mau, lan_cuoi) VALUES (?,?,?)",
+                (sang_sqlite(chinh), mau[:200], now),
+            )
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO noi_dung_bang (bang, khoa, van_tay) VALUES (?,?,?)",
+                [(b, k, sang_sqlite(chinh)) for b, k in cac_bang(chinh)],
+            )
+        else:
+            self._conn.execute(
+                "UPDATE noi_dung SET lan_cuoi=? WHERE van_tay=?",
+                (now, sang_sqlite(chinh)),
+            )
+
+        self._conn.execute(
+            "INSERT OR IGNORE INTO noi_dung_acc (van_tay, user_id, chat_id, ts)"
+            " VALUES (?,?,?,?)",
+            (sang_sqlite(chinh), user_id, chat_id, now),
+        )
+        self._conn.commit()
+        cur = self._conn.execute(
+            "SELECT COUNT(*) FROM noi_dung_acc WHERE van_tay=?", (sang_sqlite(chinh),)
+        )
+        return chinh, int(cur.fetchone()[0])
+
+    async def ghi_noi_dung(
+        self, vt: int, mau: str, user_id: int, chat_id: int
+    ) -> tuple[int, int]:
+        return await self._run(self._ghi_noi_dung, vt, mau, user_id, chat_id)
+
+    def _acc_cua_noi_dung(self, vt: int) -> list[tuple[int, int]]:
+        cur = self._conn.execute(
+            "SELECT user_id, chat_id FROM noi_dung_acc WHERE van_tay=?", (sang_sqlite(vt),)
+        )
+        return [(int(u), int(c)) for u, c in cur.fetchall()]
+
+    async def acc_cua_noi_dung(self, vt: int) -> list[tuple[int, int]]:
+        return await self._run(self._acc_cua_noi_dung, vt)
+
+    async def tim_van_tay(self, vt: int) -> int | None:
+        """Vân tay đang dùng cho nội dung này, không ghi thêm lượt đăng nào."""
+        return await self._run(self._tim_gan_giong, vt)
+
+    def _cac_chien_dich(self, toi_thieu: int, gioi_han: int) -> list[tuple[int, int, str]]:
+        cur = self._conn.execute(
+            "SELECT COUNT(*) n, COUNT(DISTINCT a.chat_id) g, d.mau"
+            " FROM noi_dung_acc a JOIN noi_dung d ON d.van_tay = a.van_tay"
+            " WHERE a.van_tay NOT IN (SELECT van_tay FROM noi_dung_tha)"
+            " GROUP BY a.van_tay HAVING n >= ? ORDER BY n DESC LIMIT ?",
+            (toi_thieu, gioi_han),
+        )
+        return [(int(n), int(g), m or "") for n, g, m in cur.fetchall()]
+
+    async def cac_chien_dich(
+        self, toi_thieu: int = 3, gioi_han: int = 10
+    ) -> list[tuple[int, int, str]]:
+        return await self._run(self._cac_chien_dich, toi_thieu, gioi_han)
+
+    def _noi_dung_duoc_tha(self, vt: int) -> bool:
+        cur = self._conn.execute(
+            "SELECT 1 FROM noi_dung_tha WHERE van_tay=?", (sang_sqlite(vt),)
+        )
+        return cur.fetchone() is not None
+
+    async def noi_dung_duoc_tha(self, vt: int) -> bool:
+        return await self._run(self._noi_dung_duoc_tha, vt)
+
+    def _tha_noi_dung(self, vt: int) -> None:
+        """Đánh dấu một nội dung là hợp lệ, kể cả khi nhiều người cùng đăng."""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO noi_dung_tha (van_tay) VALUES (?)", (sang_sqlite(vt),)
+        )
+        self._conn.commit()
+
+    async def tha_noi_dung(self, vt: int) -> None:
+        await self._run(self._tha_noi_dung, vt)
+
+    def _don_noi_dung(self, giu_ngay: int) -> int:
+        """Xoá nội dung cũ không thành chiến dịch, để bảng không phình mãi.
+
+        Chiến dịch thật kéo dài hàng tuần (đo được: 27 ngày) nên phải giữ lâu.
+        Nhưng nội dung chỉ có MỘT người đăng thì không bao giờ thành chiến
+        dịch, giữ lại chẳng để làm gì - đó cũng là phần lớn số dòng.
+        """
+        han = int(time.time()) - giu_ngay * 86400
+        cur = self._conn.execute(
+            "SELECT van_tay FROM noi_dung WHERE lan_cuoi < ? AND van_tay NOT IN"
+            " (SELECT van_tay FROM noi_dung_acc GROUP BY van_tay HAVING COUNT(*) > 1)",
+            (han,),
+        )
+        cu = [r[0] for r in cur.fetchall()]
+        if not cu:
+            return 0
+        for bang in ("noi_dung_acc", "noi_dung_bang", "noi_dung"):
+            self._conn.executemany(
+                f"DELETE FROM {bang} WHERE van_tay=?", [(v,) for v in cu]
+            )
+        self._conn.commit()
+        return len(cu)
+
+    async def don_noi_dung(self, giu_ngay: int = 30) -> int:
+        return await self._run(self._don_noi_dung, giu_ngay)

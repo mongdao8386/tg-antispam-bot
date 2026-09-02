@@ -1,16 +1,17 @@
-"""Chống rải hàng loạt: dồn tin, lặp nội dung, và nhiều acc phối hợp.
+"""Chống rải: một NGƯỜI đăng quá nhanh hoặc đăng lặp lại.
 
-Bot chấm từng tin riêng lẻ thì không bao giờ thấy được ba kiểu tấn công này:
+  1. DỒN TIN  - một người bắn 15 tin trong 8 giây
+  2. LẶP LẠI  - một người gửi đi gửi lại cùng một nội dung
 
-  1. DỒN TIN    - một người bắn 15 tin trong 8 giây
-  2. LẶP LẠI    - cùng một nội dung gửi đi gửi lại, mỗi lần đổi vài chữ
-  3. PHỐI HỢP   - 5 tài khoản khác nhau cùng đăng một nội dung y hệt
+Cả hai đều nói về MỘT tài khoản trong MỘT nhóm, trong vài giây tới vài phút.
+Loại đó hợp với bộ nhớ tạm: nhanh, không đụng database, khởi động lại thì
+quên - không ai bị phạt vì chuyện hôm qua.
 
-Kiểu 3 là nguy hiểm nhất và cũng là thứ bot thường bỏ lọt hoàn toàn: từng tin
-một nhìn hoàn toàn vô hại, chỉ khi đặt cạnh nhau mới lộ ra là chiến dịch.
-
-Toàn bộ chạy trong bộ nhớ, không đụng database - mỗi lần kiểm tra dưới 0,01 ms.
-Bộ nhớ có trần cứng nên nhóm đông cỡ nào cũng không phình.
+Kiểu thứ ba, NHIỀU TÀI KHOẢN cùng đăng một bài, đã chuyển sang bộ nhớ lưu
+trong database (xem storage.ghi_noi_dung và vantay.py). Lý do: đo trên dữ
+liệu thật, chiến dịch lớn nhất dùng 334 tài khoản trên 16 nhóm nhưng kéo dài
+27 NGÀY, chỗ dày nhất chỉ 14 tin mỗi 5 phút. Một cửa sổ 5 phút trong bộ nhớ
+tạm, lại đếm riêng từng nhóm, gần như mù trước kiểu rải chậm đó.
 """
 
 from __future__ import annotations
@@ -24,9 +25,8 @@ from .normalize import squeeze_keep_accents
 # lặp lại là chuyện bình thường, không phải rải quảng cáo.
 TOI_THIEU_KY_TU = 12
 
-# Trần bộ nhớ, tính theo số nhóm và số người trong mỗi nhóm được theo dõi.
+# Trần bộ nhớ, tính theo số người trong mỗi nhóm được theo dõi.
 TRAN_NGUOI_MOI_NHOM = 2000
-TRAN_VAN_TAY_MOI_NHOM = 500
 
 
 def van_tay(chu: str, anh_id: str = "") -> str:
@@ -48,13 +48,11 @@ class BoTheoDoi:
     Ba sổ ghi, mỗi sổ trả lời một câu hỏi:
         nhip[chat][user]      - người này gửi bao nhiêu tin gần đây?
         lap[chat][user][vt]   - người này gửi nội dung này mấy lần?
-        chien_dich[chat][vt]  - nội dung này do bao nhiêu người khác nhau gửi?
     """
 
     def __init__(self) -> None:
         self._nhip: dict[int, dict[int, deque[float]]] = defaultdict(dict)
         self._lap: dict[int, dict[tuple[int, str], deque[float]]] = defaultdict(dict)
-        self._chien_dich: dict[int, dict[str, dict[int, float]]] = defaultdict(dict)
 
     # -- dọn dẹp ---------------------------------------------------------
 
@@ -69,10 +67,6 @@ class BoTheoDoi:
         if len(nhip) > TRAN_NGUOI_MOI_NHOM:
             for uid in sorted(nhip, key=lambda u: nhip[u][-1] if nhip[u] else 0)[:len(nhip) // 4]:
                 nhip.pop(uid, None)
-        cd = self._chien_dich[chat_id]
-        if len(cd) > TRAN_VAN_TAY_MOI_NHOM:
-            for vt in sorted(cd, key=lambda v: max(cd[v].values(), default=0))[:len(cd) // 4]:
-                cd.pop(vt, None)
 
     # -- ghi nhận và kết luận --------------------------------------------
 
@@ -109,33 +103,8 @@ class BoTheoDoi:
         if len(lap) >= cfg.repeat_limit:
             return f"gửi lại cùng một nội dung {len(lap)} lần"
 
-        # --- 3. Phối hợp: nhiều acc khác nhau, cùng nội dung ---
-        # Chỉ xét chữ. Ba người cùng đăng lại một tấm meme trong 5 phút là
-        # chuyện thường ở nhóm đông; ba người cùng gõ y hệt một đoạn chữ dài
-        # thì gần như chắc chắn là chiến dịch.
-        if vt.startswith("a:"):
-            self._gioi_han(chat_id)
-            return None
-        nguoi_gui = self._chien_dich[chat_id].setdefault(vt, {})
-        nguoi_gui[user_id] = bay_gio
-        han = bay_gio - cfg.raid_window
-        for uid in [u for u, t in nguoi_gui.items() if t < han]:
-            nguoi_gui.pop(uid, None)
-        if len(nguoi_gui) >= cfg.raid_users:
-            return (
-                f"{len(nguoi_gui)} tài khoản cùng đăng một nội dung "
-                f"trong {cfg.raid_window // 60:.0f} phút"
-            )
-
         self._gioi_han(chat_id)
         return None
-
-    def dong_pham(self, chat_id: int, chu: str, anh_id: str) -> list[int]:
-        """Những ai khác cũng vừa đăng đúng nội dung này (để xử lý cả ổ)."""
-        vt = van_tay(chu, anh_id)
-        if not vt:
-            return []
-        return list(self._chien_dich.get(chat_id, {}).get(vt, {}))
 
     def quen(self, chat_id: int, user_id: int) -> None:
         """Xoá dấu vết của một người - gọi sau khi đã xử lý xong."""

@@ -113,35 +113,77 @@ tăng tương phản (Otsu) cho ảnh mờ.
 
 ## Chống rải hàng loạt
 
-Ba luật trên đây xét **nội dung** từng tin. Phần này xét **hành vi** — bắt được
-cả những tin mà đọc riêng từng cái thì hoàn toàn vô hại:
+Các luật trên xét **nội dung** từng tin. Phần này xét **hành vi** — bắt được cả
+những tin mà đọc riêng từng cái thì hoàn toàn vô hại.
 
-| Kiểu | Bắt khi | Chỉnh bằng |
+| Kiểu | Bắt khi | Nhớ ở đâu |
 |---|---|---|
-| Dồn tin | Một người gửi 10 tin trong 10 giây | `FLOOD_MSGS`, `FLOOD_WINDOW` |
-| Lặp lại | Một người gửi lại cùng nội dung 4 lần trong 2 phút | `REPEAT_LIMIT`, `REPEAT_WINDOW` |
-| Phối hợp | 3 tài khoản khác nhau cùng đăng một đoạn chữ trong 5 phút | `RAID_USERS`, `RAID_WINDOW` |
+| Dồn tin | Một người gửi 10 tin trong 10 giây | bộ nhớ tạm |
+| Lặp lại | Một người gửi lại cùng nội dung 4 lần trong 2 phút | bộ nhớ tạm |
+| **Chiến dịch** | **3 tài khoản khác nhau cùng đăng một bài** | **database** |
 
-Luật "phối hợp" là thứ bot thường bỏ lọt hoàn toàn, vì từng tin một nhìn không
-có gì sai — chỉ khi đặt cạnh nhau mới lộ ra là chiến dịch. Bắt được rồi thì bot
-**hốt cả ổ**: đuổi luôn những tài khoản đã đăng cùng nội dung trước đó, chứ
-không chỉ xử cái acc cuối cùng vừa bị bắt.
+### Chiến dịch: thứ bot khác không thấy
 
-Vài điểm đã cân nhắc để khỏi bắt oan:
+Đây là kiểu tấn công nguy hiểm nhất, và cũng là thứ bot chống spam thường bỏ lọt
+hoàn toàn: từng tin một nhìn không có gì sai, chỉ khi đặt cạnh nhau mới lộ ra.
 
-- **Acc seeding được bỏ qua hoàn toàn** — nick của mình đăng trùng nhau giữa
-  các nhóm là chuyện bình thường.
-- **Luật phối hợp chỉ xét chữ, không xét ảnh.** Ba người cùng đăng lại một tấm
-  meme trong 5 phút là chuyện thường ở nhóm đông.
-- **Nội dung dưới 12 ký tự không tính lặp.** "ok", "vâng", "=))" lặp bao nhiêu
-  lần cũng được.
-- **Mỗi nhóm đếm riêng.** Đăng ở 3 nhóm khác nhau không cộng dồn thành chiến dịch.
+Đo trên dữ liệu thật của nhóm, chiến dịch lớn nhất:
 
-Tắt bằng `CHONG_RAI=false`, hoặc bấm trong menu công tắc của bot. Toàn bộ chạy
-trong bộ nhớ (0,02 ms mỗi tin, không đụng database); khởi động lại là quên hết,
-nên không ai bị phạt vì chuyện hôm qua.
+| | |
+|---|---|
+| Tài khoản tham gia | **334** |
+| Nhóm bị rải | 16 |
+| Kéo dài | **27 ngày** |
+| Chỗ dày nhất | 14 tin / 5 phút |
 
-## Tự xoá tin nhắn dịch vụ
+Vì rải chậm như vậy nên bộ nhớ tạm vài phút, lại đếm riêng từng nhóm, gần như mù.
+Bot này nhớ vân tay nội dung **trong database, đếm trên mọi nhóm, không giới hạn
+thời gian**. Chạy lại toàn bộ lịch sử: nhận ra **36 chiến dịch**, bắt được **30%
+số lượt ban ngay từ tin đầu tiên**.
+
+Điểm mấu chốt: luật này **không quan tâm tin nhắn nói gì**. Kẻ spam đổi hết từ
+khoá, bỏ hết link, viết lại cả bài vẫn dính — vì cái lộ ra không nằm trong một
+tin, mà nằm ở chỗ nhiều tài khoản cùng đăng một thứ.
+
+Bắt được rồi thì **hốt cả ổ**: database nhớ ai đã đăng bài đó ở nhóm nào, kể cả
+từ nhiều ngày trước, nên đuổi được cả những acc đã đăng xong đi mất từ lâu.
+
+### Xào lại vài chữ cũng không thoát
+
+Vân tay dùng SimHash trên cụm 3 ký tự, nên sửa vặt chỉ làm **lật vài bit** chứ
+không đổi hẳn vân tay như hàm băm thường:
+
+| Biến thể | Lệch | Kết luận |
+|---|---|---|
+| Thêm emoji, đổi HOA/thường, thêm dấu chấm than | 0 bit | cùng một bài |
+| Chèn dấu chấm giữa chữ (`S.a.n`) | 0 bit | cùng một bài |
+| Thêm một cụm ngắn ở cuối | 5 bit | cùng một bài |
+| Đổi con số tiền (`100k` → `200k`) | 6 bit | cùng một bài |
+| Đổi hẳn tên sàn | 9 bit | bài khác |
+| Hai câu nội dung khác hẳn | 24–35 bit | bài khác |
+
+Ngưỡng đặt ở 6 bit — nằm giữa hai vùng, cách xa cả hai bên.
+
+Tra cứu vân tay gần giống mà không quét cả bảng: cắt 64 bit thành 8 băng rồi
+đánh chỉ mục từng băng. Theo nguyên lý chuồng bồ câu, hai vân tay lệch không quá
+7 bit thì chắc chắn có ít nhất một băng trùng khít — nên chỉ cần tra khoá chính.
+
+### Để khỏi bắt oan
+
+- **Acc seeding được bỏ qua hoàn toàn** — nick của mình đăng trùng nhau giữa các
+  nhóm là chuyện bình thường.
+- **Nội dung dưới 25 ký tự không lấy vân tay.** "ok", "chào cả nhà", "cảm ơn nhé"
+  bao nhiêu người cùng nói cũng được.
+- **`/allow_content`** (reply) — tha một nội dung hay bị đăng lại hợp lệ: nội quy,
+  thông báo định kỳ, mẫu đăng ký sự kiện.
+- **`/campaigns`** — xem bot đang coi những gì là chiến dịch, trước khi tin nó.
+- Luật dồn tin và lặp lại chỉ nhớ trong bộ nhớ tạm, khởi động lại là quên — không
+  ai bị phạt vì chuyện hôm qua.
+
+Tắt bằng `CHONG_RAI=false` hoặc trong menu công tắc. Tốc độ: **0,06 ms** cho vân
+tay, **0,13 ms** cho cả lượt tra database.
+
+## Tự xoá tin nhắn dịch vụ## Tự xoá tin nhắn dịch vụ
 
 Những dòng chữ xám do Telegram tự sinh (*"X đã tham gia nhóm"*, *"X đã rời nhóm"*,
 *"X đã ghim một tin nhắn"*…) được bot xoá luôn để nhóm sạch. Cấu hình bằng
@@ -259,11 +301,13 @@ antispam_bot/
   detector.py   từ khoá + regex + luật dứt khoát  ← chỉnh ở đây khi muốn thêm luật
   ngucanh.py    xét ngữ cảnh quanh từ cấm trước khi kết luận
   raivai.py     chống rải hàng loạt (dồn tin / lặp / phối hợp)
+  vantay.py     vân tay nội dung chịu được sửa đổi nhỏ (SimHash)
   qrscan.py     giải mã QR trong ảnh (OpenCV, tuỳ chọn)
   storage.py    SQLite: thành viên mới, lịch sử vi phạm, whitelist theo nhóm
   bot.py        handler Telegram, thực thi hình phạt, lệnh quản trị
   __main__.py   khởi chạy
 tests/
+  test_vantay.py
   test_detector.py
 ```
 
