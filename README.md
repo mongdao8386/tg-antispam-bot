@@ -64,6 +64,36 @@ tăng tương phản (Otsu) cho ảnh mờ.
 > Chạy lại thêm một lần nữa là được — Windows kiểm tra danh tiếng đám mây xong sẽ cho
 > phép. Log lúc khởi động cho biết trạng thái: `Quét mã QR trong ảnh: BẬT` hoặc `TẮT`.
 
+## Chống rải hàng loạt
+
+Ba luật trên đây xét **nội dung** từng tin. Phần này xét **hành vi** — bắt được
+cả những tin mà đọc riêng từng cái thì hoàn toàn vô hại:
+
+| Kiểu | Bắt khi | Chỉnh bằng |
+|---|---|---|
+| Dồn tin | Một người gửi 10 tin trong 10 giây | `FLOOD_MSGS`, `FLOOD_WINDOW` |
+| Lặp lại | Một người gửi lại cùng nội dung 4 lần trong 2 phút | `REPEAT_LIMIT`, `REPEAT_WINDOW` |
+| Phối hợp | 3 tài khoản khác nhau cùng đăng một đoạn chữ trong 5 phút | `RAID_USERS`, `RAID_WINDOW` |
+
+Luật "phối hợp" là thứ bot thường bỏ lọt hoàn toàn, vì từng tin một nhìn không
+có gì sai — chỉ khi đặt cạnh nhau mới lộ ra là chiến dịch. Bắt được rồi thì bot
+**hốt cả ổ**: đuổi luôn những tài khoản đã đăng cùng nội dung trước đó, chứ
+không chỉ xử cái acc cuối cùng vừa bị bắt.
+
+Vài điểm đã cân nhắc để khỏi bắt oan:
+
+- **Acc seeding được bỏ qua hoàn toàn** — nick của mình đăng trùng nhau giữa
+  các nhóm là chuyện bình thường.
+- **Luật phối hợp chỉ xét chữ, không xét ảnh.** Ba người cùng đăng lại một tấm
+  meme trong 5 phút là chuyện thường ở nhóm đông.
+- **Nội dung dưới 12 ký tự không tính lặp.** "ok", "vâng", "=))" lặp bao nhiêu
+  lần cũng được.
+- **Mỗi nhóm đếm riêng.** Đăng ở 3 nhóm khác nhau không cộng dồn thành chiến dịch.
+
+Tắt bằng `CHONG_RAI=false`, hoặc bấm trong menu công tắc của bot. Toàn bộ chạy
+trong bộ nhớ (0,02 ms mỗi tin, không đụng database); khởi động lại là quên hết,
+nên không ai bị phạt vì chuyện hôm qua.
+
 ## Tự xoá tin nhắn dịch vụ
 
 Những dòng chữ xám do Telegram tự sinh (*"X đã tham gia nhóm"*, *"X đã rời nhóm"*,

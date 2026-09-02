@@ -45,7 +45,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import control, ngucanh, ocr, presets, qrscan, web
+from . import control, ngucanh, ocr, presets, qrscan, raivai, web
 from .config import VALID_ACTIONS, Config
 from .detector import MessageFacts, Verdict, analyse
 from .normalize import (
@@ -753,6 +753,40 @@ async def _ban_moi_nhom(
         log.info("Đuổi %s (%s) khỏi %d nhóm còn lại.", ten, uid, len(xong))
 
 
+async def _hot_ca_o(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, chu: str, anh_id: str, tru: int
+) -> None:
+    """Bắt được chiến dịch thì đuổi luôn những acc đã đăng cùng nội dung.
+
+    Bot thường chỉ xử lý cái tin nó vừa nhìn thấy. Nhưng một chiến dịch rải
+    chỉ lộ ra ở tài khoản THỨ BA - hai acc trước đã đăng xong và đi mất, tin
+    của họ vẫn nằm nguyên trong nhóm. Xử mỗi acc cuối là bắt cóc bỏ đĩa.
+    """
+    db = _db(context)
+    cfg = _cfg(context)
+    dong_pham = [u for u in _theo_doi.dong_pham(chat_id, chu, anh_id) if u != tru]
+    if not dong_pham:
+        return
+
+    ly_do = "đồng phạm trong chiến dịch rải hàng loạt"
+    duoi_het = await control.get_flag(db, cfg, "ban_all_groups")
+    for uid in dong_pham:
+        if uid in cfg.owner_ids or uid in await _bot_admin_ids(context):
+            continue
+        if uid in await _admin_ids(chat_id, context):
+            continue
+        try:
+            await context.bot.ban_chat_member(chat_id, uid, revoke_messages=True)
+        except TelegramError:
+            continue
+        await db.log_offence(chat_id, uid, 9999, "ban", ly_do, chu[:200], "")
+        await db.forget_member(chat_id, uid)
+        _theo_doi.quen(chat_id, uid)
+        if duoi_het:
+            asyncio.create_task(_ban_moi_nhom(context, uid, chat_id, str(uid)))
+    log.info("Hốt cả ổ: đuổi thêm %d tài khoản cùng chiến dịch.", len(dong_pham))
+
+
 async def _check_brake(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Ban dồn dập trong thời gian ngắn -> tự chuyển sang chế độ chỉ ghi log.
 
@@ -837,6 +871,11 @@ async def _punish(context: ContextTypes.DEFAULT_TYPE, msg: Message, action: str)
 # ---------------------------------------------------------------------------
 
 
+# Sổ theo dõi nhịp gửi tin, dùng chung cho mọi nhóm. Nằm trong bộ nhớ nên
+# khởi động lại là quên hết - đúng ý muốn: không ai bị phạt vì chuyện hôm qua.
+_theo_doi = raivai.BoTheoDoi()
+
+
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
     chat = update.effective_chat
@@ -872,6 +911,28 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     force_punish = sender_id is not None and sender_id in rules.blocked
     force_reason = "trong danh sách chặn cứng"
     fwd_exempt = False
+
+    # --- Chống rải hàng loạt ---
+    # Xét trước mọi thứ khác vì đây là luật về HÀNH VI, không phải nội dung:
+    # nó bắt được cả những tin mà đọc riêng từng cái thì hoàn toàn vô hại.
+    # Acc seeding của mình đăng trùng nhau là chuyện bình thường nên bỏ qua.
+    if (
+        not force_punish
+        and msg.sender_chat is None
+        and msg.from_user is not None
+        and msg.from_user.id not in rules.seeding
+        and await control.get_flag(db, cfg, "chong_rai")
+    ):
+        ly_do_rai = _theo_doi.ghi(
+            chat.id,
+            msg.from_user.id,
+            " ".join(filter(None, [msg.text, msg.caption])),
+            msg.photo[-1].file_unique_id if msg.photo else "",
+            cfg,
+        )
+        if ly_do_rai:
+            force_punish = True
+            force_reason = ly_do_rai
 
     is_new = False
     offences = 0
@@ -949,10 +1010,21 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Bi ban roi thi khong con la thanh vien - xoa khoi bang members de
         # khong hien trong danh sach va khong tinh vao thong ke nua.
         await db.forget_member(chat.id, uid)
+        _theo_doi.quen(chat.id, uid)
         # Đuổi luôn khỏi các nhóm còn lại. Chạy nền để không giữ chân tin
         # nhắn kế tiếp - ban 15 nhóm mất vài giây.
         if await control.get_flag(db, cfg, "ban_all_groups") and msg.sender_chat is None:
             asyncio.create_task(_ban_moi_nhom(context, uid, chat.id, ten or str(uid)))
+        # Nếu đây là chiến dịch rải, hốt luôn những acc đã đăng cùng nội dung.
+        if "tài khoản cùng đăng" in force_reason:
+            asyncio.create_task(
+                _hot_ca_o(
+                    context, chat.id,
+                    " ".join(filter(None, [msg.text, msg.caption])),
+                    msg.photo[-1].file_unique_id if msg.photo else "",
+                    uid,
+                )
+            )
     if action in ("ban", "mute"):
         await _check_brake(context)
 

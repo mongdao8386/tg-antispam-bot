@@ -128,6 +128,18 @@ class Config:
     block_phones: bool = True
     # Chặn người đặt tên giả mạo ban quản trị (Trợ lý, QTV, Admin...).
     block_fake_admin: bool = True
+    # --- Chống rải hàng loạt ---
+    chong_rai: bool = True
+    # Dồn tin: bấy nhiêu tin trong bấy nhiêu giây. 0 = tắt toàn bộ phần này.
+    flood_msgs: int = 10
+    flood_window: float = 10.0
+    # Lặp lại: cùng người gửi cùng nội dung bấy nhiêu lần.
+    repeat_limit: int = 4
+    repeat_window: float = 120.0
+    # Phối hợp: bấy nhiêu tài khoản KHÁC NHAU cùng đăng một nội dung.
+    raid_users: int = 3
+    raid_window: float = 300.0
+
     # Ban ở một nhóm thì đuổi luôn khỏi mọi nhóm đang quản lý.
     ban_all_groups: bool = True
 
@@ -215,6 +227,13 @@ class Config:
             block_mentions=_bool("BLOCK_MENTIONS", True),
             block_phones=_bool("BLOCK_PHONES", True),
             block_fake_admin=_bool("BLOCK_FAKE_ADMIN", True),
+            chong_rai=_bool("CHONG_RAI", True),
+            flood_msgs=_int("FLOOD_MSGS", 10),
+            flood_window=float(_int("FLOOD_WINDOW", 10)),
+            repeat_limit=_int("REPEAT_LIMIT", 4),
+            repeat_window=float(_int("REPEAT_WINDOW", 120)),
+            raid_users=_int("RAID_USERS", 3),
+            raid_window=float(_int("RAID_WINDOW", 300)),
             ban_all_groups=_bool("BAN_ALL_GROUPS", True),
             brake_limit=_int("BRAKE_LIMIT", 5),
             brake_window=_int("BRAKE_WINDOW", 60),

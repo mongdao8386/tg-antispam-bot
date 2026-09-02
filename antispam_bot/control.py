@@ -72,6 +72,7 @@ CONG_TAC = {
     "block_fake_admin": "Chặn tên giả mạo admin",
     "block_forwards": "Chặn tin chuyển tiếp",
     "block_links": "Chặn link lạ",
+    "chong_rai": "Chống rải hàng loạt",
 }
 
 
