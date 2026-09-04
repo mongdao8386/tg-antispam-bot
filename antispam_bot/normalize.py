@@ -70,6 +70,21 @@ def normalize(text: str) -> str:
     return text.strip()
 
 
+# Gộp MỌI chuỗi ký tự giống nhau liền kề về một ký tự.
+#
+# Khác với REPEAT_RE ở trên (chỉ gộp khi lặp từ 3 lần): kẻ spam chỉ cần nhân
+# đôi MỘT chữ cái là thoát hết luật từ khoá - "lộcc", "nhắnn", "nhàa cái",
+# "lừaa đảoo". Đo trên bộ dò cũ: mọi từ khoá đều lọt sạch bằng chiêu này.
+# Không gộp mạnh tay ngay từ normalize() vì "xoong" -> "xong" là hai từ khác
+# nhau; chỉ dùng làm dạng SO KHỚP DỰ PHÒNG, áp cho cả hai vế nên không lệch.
+GOP_LAP_RE = re.compile(r"(.)\1+")
+
+
+def collapse_repeats(text: str) -> str:
+    """'nhaa caii uy tinn' -> 'nha cai uy tin'."""
+    return GOP_LAP_RE.sub(r"\1", text)
+
+
 def squeeze(text: str) -> str:
     """Dạng chuẩn đã bỏ hết khoảng trắng, bắt được 'k i e m t i e n'."""
     return normalize(text).replace(" ", "")

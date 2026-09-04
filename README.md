@@ -168,6 +168,34 @@ Tra cứu vân tay gần giống mà không quét cả bảng: cắt 64 bit thà
 đánh chỉ mục từng băng. Theo nguyên lý chuồng bồ câu, hai vân tay lệch không quá
 7 bit thì chắc chắn có ít nhất một băng trùng khít — nên chỉ cần tra khoá chính.
 
+### Nhân đôi chữ cái — chiêu né rẻ nhất
+
+`normalize()` chỉ gộp khi một chữ lặp **từ 3 lần**, nên gõ đúng **hai lần** là
+lọt sạch mọi luật từ khoá — kể cả danh sách tự đặt:
+
+| Viết | Trước | Nay |
+|---|---|---|
+| `nhà cái uy tín` | chặn | chặn |
+| `nhàa cáii uy tínn` | **lọt** | chặn |
+| `lừaa đảoo`, `luaa daoo` | **lọt** | chặn |
+| `gaii gooi`, `taii xiuu` | **lọt** | chặn |
+
+Gặp ngoài thực tế dưới dạng `lộcc 70k nhắnn tele`. Nay có thêm dạng so khớp
+**đã gộp mọi chữ lặp**, áp cho cả hai vế nên không lệch nhau.
+
+Không gộp thẳng trong `normalize()` vì "xoong" và "xong" là hai từ khác nhau —
+chỉ dùng làm dạng **dự phòng**, khi các dạng kia đã không khớp. Dạng gộp vẫn
+**giữ dấu**, nên `lựa đào` gộp xong vẫn là `lựa đào`, không biến thành
+`lua dao`: chống ban oan cũ vẫn nguyên vẹn.
+
+### Đã thử và bỏ: che chữ số
+
+Kẻ rải hay xoay con số (`70k` → `50k`) để tách vân tay. Thử thay mọi chữ số
+bằng `#` trước khi lấy vân tay — đo trên lịch sử thật thì **bắt được ÍT hơn**
+(635 so với 648 lượt, 39 so với 41 chiến dịch), lại gộp nhầm *"chuyển khoản
+500k"* với *"chuyển khoản 200k"*. Ba thành viên khoe bill khác số tiền sẽ bị
+tính thành một chiến dịch. Không đáng.
+
 ### Để khỏi bắt oan
 
 - **Acc seeding được bỏ qua hoàn toàn** — nick của mình đăng trùng nhau giữa các

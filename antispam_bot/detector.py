@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 
 from . import ngucanh
 from .config import Config
-from .normalize import INVISIBLE_RE, normalize, squeeze
+from .normalize import INVISIBLE_RE, collapse_repeats, normalize, squeeze
 
 # --------------------------------------------------------------------------
 # Từ khoá (viết ở dạng đã bỏ dấu, chữ thường - xem normalize.py)
@@ -106,6 +106,14 @@ CHAN = {normalize(k) for k in _CHAN_GOC}
 # đã ngốn hơn 1 ms. Chỉ giữ cụm đủ dài để không khớp nhầm khi nối chữ giữa
 # các từ bình thường.
 SQUEEZED = {squeeze(k): k for k in CHAN if len(squeeze(k)) >= 12}
+
+# Dạng đã gộp mọi chữ lặp, để bắt kiểu "nhàa cáii uy tínn", "gaii gooi".
+# Chỉ giữ cụm còn đủ dài sau khi gộp - cụm quá ngắn dễ khớp nhầm. Sáu ký tự
+# là đủ an toàn vì vế kia so theo RANH GIỚI TỪ, không phải chuỗi con.
+GOP_LAP = {
+    nen: k for k in CHAN
+    if len(nen := collapse_repeats(k)) >= 6
+}
 
 # --------------------------------------------------------------------------
 # Regex
@@ -312,7 +320,15 @@ def _khop_tu_khoa(haystack: str, squeezed: str) -> list[str]:
     if hits:
         return hits
     # Không thấy dạng thường thì thử dạng dồn chữ: "k i e m t i e n o n l i n e".
-    return [goc for nen, goc in SQUEEZED.items() if nen in squeezed]
+    hits = [goc for nen, goc in SQUEEZED.items() if nen in squeezed]
+    if hits:
+        return hits
+    # Cuối cùng: dạng đã gộp chữ lặp, bắt kiểu "nhàa cáii uy tínn".
+    # Nhân đôi một chữ cái là chiêu né rẻ tiền nhất mà lại hiệu quả nhất -
+    # REPEAT_RE trong normalize() chỉ gộp khi lặp từ 3 lần, nên gõ hai lần là
+    # lọt sạch. Áp cùng phép gộp cho cả danh sách nên hai vế không lệch nhau.
+    gop = f" {collapse_repeats(haystack)} "
+    return [goc for nen, goc in GOP_LAP.items() if f" {nen} " in gop]
 
 
 def analyse(facts: MessageFacts, cfg: Config) -> Verdict:

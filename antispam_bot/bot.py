@@ -49,6 +49,7 @@ from . import control, ngucanh, ocr, presets, qrscan, raivai, vantay, web
 from .config import VALID_ACTIONS, Config
 from .detector import MessageFacts, Verdict, analyse
 from .normalize import (
+    collapse_repeats,
     looks_like_question,
     normalize,
     normalize_keep_accents,
@@ -129,14 +130,19 @@ async def _bot_admin_ids(context: ContextTypes.DEFAULT_TYPE) -> set[int]:
     return ids
 
 
-def _dang_tu_cam(tu: str) -> tuple[str, str, str, str]:
-    """Bốn dạng của một từ cấm, dùng để so khớp.
+def _dang_tu_cam(tu: str) -> tuple[str, str, str, str, str]:
+    """Năm dạng của một từ cấm, dùng để so khớp.
 
-    (có dấu, bỏ dấu, dồn chữ có dấu, dồn chữ bỏ dấu)
+    (có dấu, bỏ dấu, dồn chữ có dấu, dồn chữ bỏ dấu, gộp chữ lặp)
+
+    Dạng thứ năm bịt chiêu né rẻ nhất mà hiệu quả nhất: nhân đôi một chữ cái.
+    "lừaa đảoo", "lộcc", "nhắnn" - normalize() chỉ gộp khi lặp từ 3 lần nên gõ
+    hai lần là lọt hết bốn dạng kia.
     """
     return (
         normalize_keep_accents(tu), normalize(tu),
         squeeze_keep_accents(tu), squeeze(tu),
+        collapse_repeats(normalize_keep_accents(tu)),
     )
 
 
@@ -154,10 +160,15 @@ def _khop_tu_cam(rules_keywords, chu: str) -> list[str]:
     """
     co_dau = normalize_keep_accents(chu)
     don_co_dau = squeeze_keep_accents(chu)
+    gop_lap = collapse_repeats(co_dau)
     return [
-        raw for raw, k_cd, k_kd, k_dcd, k_dkd in rules_keywords
+        raw for raw, k_cd, k_kd, k_dcd, k_dkd, k_gop in rules_keywords
         if k_cd in co_dau or k_kd in co_dau
         or k_dcd in don_co_dau or k_dkd in don_co_dau
+        # Dạng gộp GIỮ DẤU nên vẫn an toàn với "lựa đào": gộp chữ lặp không
+        # đụng tới dấu, "lựa đào" gộp xong vẫn là "lựa đào", không thành
+        # "lua dao". Nhờ vậy so được cả với dạng từ khoá không dấu.
+        or k_gop in gop_lap or k_kd in gop_lap
     ]
 
 

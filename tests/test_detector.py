@@ -109,6 +109,41 @@ QR_HAM = [
 ]
 
 
+# --- Nhân đôi chữ cái để né bộ lọc -------------------------------------
+# Chiêu rẻ nhất mà hiệu quả nhất, gặp ngoài thực tế: "lộcc 70k nhắnn tele".
+# normalize() chỉ gộp khi lặp TỪ 3 LẦN, nên gõ hai lần là lọt sạch mọi luật
+# từ khoá - kể cả danh sách tự đặt. Đo lại trước khi sửa: 100% cụm đều lọt.
+
+NHAN_DOI_CHU = [
+    "nhaa caii uy tinn",
+    "gaii gooi",
+    "tuyeen ctvv onlinee",
+    "lamm bangg giaa",
+    "vayy tienn nhanhh chii cann cmndd",
+    "taii xiuu noo huu",
+]
+
+# Người thật cũng kéo dài chữ cho vui - những câu này KHÔNG được dính.
+KEO_DAI_VO_HAI = [
+    "Chuc mung sinh nhat baan nheee",
+    "Oke ban oiii, minh dang ban chuttt",
+    "Caiii nayyy hayyy quaaa",
+    "Xoong noi nha minh bi thung roi",
+    "Ban naoo biet cach fixx loi nayy khong",
+]
+
+
+def test_nhan_doi_chu_van_bi_chan():
+    for text in NHAN_DOI_CHU:
+        assert is_spam(text), f"né được bằng cách nhân đôi chữ: {text}"
+
+
+def test_keo_dai_chu_vo_hai_van_qua():
+    for text in KEO_DAI_VO_HAI:
+        v = xet(text)
+        assert not v.is_spam, f"ban oan: {text} — lý do: {v.summary()}"
+
+
 # --- Công tắc TẮT thì phải thật sự tắt ---------------------------------
 # Lỗi cũ: khi BLOCK_PHONES=false, bot vẫn cộng 2 điểm cho "số điện thoại liên
 # hệ". Tắt mà vẫn phạt - và đây là một trong những nguồn ban oan đo được.
