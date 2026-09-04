@@ -138,6 +138,15 @@ class Config:
     # Đếm trên MỌI nhóm và KHÔNG giới hạn thời gian - chiến dịch thật đo được
     # kéo dài 27 ngày, cửa sổ vài phút là mù trước kiểu rải chậm đó.
     raid_users: int = 3
+    # Ngưỡng riêng cho ảnh, cao hơn một bậc: ba người cùng đăng lại một tấm
+    # meme là chuyện thường ở nhóm đông, ba người cùng gõ y hệt một đoạn chữ
+    # dài thì không.
+    raid_users_anh: int = 4
+
+    # --- Tự học từ những lần gỡ ban (xem tuhoc.py) ---
+    tu_hoc: bool = True
+    # Bấy nhiêu lần /undo cho CÙNG một luật thì bot tự tắt công tắc của luật đó.
+    tu_hoc_nguong: int = 5
 
     # Ban ở một nhóm thì đuổi luôn khỏi mọi nhóm đang quản lý.
     ban_all_groups: bool = True
@@ -230,6 +239,9 @@ class Config:
             repeat_limit=_int("REPEAT_LIMIT", 4),
             repeat_window=float(_int("REPEAT_WINDOW", 120)),
             raid_users=_int("RAID_USERS", 3),
+            raid_users_anh=_int("RAID_USERS_ANH", 4),
+            tu_hoc=_bool("TU_HOC", True),
+            tu_hoc_nguong=_int("TU_HOC_NGUONG", 5),
             ban_all_groups=_bool("BAN_ALL_GROUPS", True),
             brake_limit=_int("BRAKE_LIMIT", 5),
             brake_window=_int("BRAKE_WINDOW", 60),

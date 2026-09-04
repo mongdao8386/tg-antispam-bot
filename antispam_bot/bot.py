@@ -45,7 +45,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import control, ngucanh, ocr, presets, qrscan, raivai, vantay, web
+from . import anhhash, control, ngucanh, ocr, presets, qrscan, raivai, tuhoc, vantay, web
 from .config import VALID_ACTIONS, Config
 from .detector import MessageFacts, Verdict, analyse
 from .normalize import (
@@ -609,8 +609,8 @@ def _image_ref(msg: Message, max_bytes: int) -> tuple[str, str] | None:
 
 async def _scan_image(
     msg: Message, context: ContextTypes.DEFAULT_TYPE
-) -> tuple[bool, list[str], str]:
-    """Soi ảnh trong tin nhắn: (có QR, nội dung QR, chữ đọc được trong ảnh).
+) -> tuple[bool, list[str], str, int | None]:
+    """Soi ảnh: (có QR, nội dung QR, chữ trong ảnh, vân tay ảnh).
 
     Tải ảnh về ĐÚNG MỘT LẦN rồi dùng chung cho cả QR lẫn OCR - trước đây mỗi
     thứ tải riêng là phí băng thông và thời gian.
@@ -620,12 +620,13 @@ async def _scan_image(
     # Đọc qua công tắc để /panel bật/tắt được ngay, không cần khởi động lại.
     want_qr = await control.get_flag(db, cfg, "scan_qr") and qrscan.AVAILABLE
     want_ocr = await control.get_flag(db, cfg, "scan_ocr") and ocr.AVAILABLE
-    if not want_qr and not want_ocr:
-        return False, [], ""
+    want_vt = await control.get_flag(db, cfg, "chong_rai") and anhhash.AVAILABLE
+    if not want_qr and not want_ocr and not want_vt:
+        return False, [], "", None
 
     ref = _image_ref(msg, max(cfg.qr_max_bytes, cfg.ocr_max_bytes))
     if ref is None:
-        return False, [], ""
+        return False, [], "", None
     file_id, unique_id = ref
 
     async def _tai_anh() -> bytes | None:
@@ -660,11 +661,11 @@ async def _scan_image(
             file_id,
             IMAGE_TOTAL_BUDGET,
         )
-        return False, [], ""
+        return False, [], "", None
 
     if data is None:
         log.warning("Không tải được ảnh %s sau %d lần: %s", file_id, so_lan, last_exc)
-        return False, [], ""
+        return False, [], "", None
 
     # Chạy SONG SONG: hai việc độc lập nhau, và cả hai đều nằm ở thread riêng
     # (OpenCV thả GIL, tesseract là tiến trình riêng) nên chồng lấn được thật.
@@ -681,8 +682,14 @@ async def _scan_image(
             )
         return ""
 
-    (has_qr, payloads), text = await asyncio.gather(_qr(), _ocr())
-    return has_qr, payloads, text
+    async def _van_tay():
+        # ~5ms mỗi ảnh, đủ nặng để không nên chạy thẳng trên event loop.
+        if want_vt:
+            return await asyncio.to_thread(anhhash.van_tay_anh, data)
+        return None
+
+    (has_qr, payloads), text, vt_anh = await asyncio.gather(_qr(), _ocr(), _van_tay())
+    return has_qr, payloads, text, vt_anh
 
 
 async def _report(
@@ -774,7 +781,7 @@ GIU_NOI_DUNG_NGAY = 45
 
 
 async def _hot_ca_o(
-    context: ContextTypes.DEFAULT_TYPE, van_tay_nd: int, nhom_goc: int, tru: int
+    context: ContextTypes.DEFAULT_TYPE, van_tay_nd: int, loai: str, nhom_goc: int, tru: int
 ) -> None:
     """Bắt được chiến dịch thì đuổi luôn mọi acc đã đăng bài đó, ở MỌI nhóm.
 
@@ -787,7 +794,7 @@ async def _hot_ca_o(
     """
     db = _db(context)
     cfg = _cfg(context)
-    cap = [(u, c) for u, c in await db.acc_cua_noi_dung(van_tay_nd) if u != tru]
+    cap = [(u, c) for u, c in await db.acc_cua_noi_dung(van_tay_nd, loai) if u != tru]
     if not cap:
         return
 
@@ -909,6 +916,34 @@ async def _punish(context: ContextTypes.DEFAULT_TYPE, msg: Message, action: str)
 _theo_doi = raivai.BoTheoDoi()
 
 
+async def _xet_chien_dich(
+    context: ContextTypes.DEFAULT_TYPE,
+    vt: int | None,
+    loai: str,
+    mau: str,
+    user_id: int,
+    chat_id: int,
+    nguong: int,
+) -> tuple[str, int] | None:
+    """Bài này đã có bao nhiêu tài khoản KHÁC NHAU đăng, ở bất kỳ nhóm nào?
+
+    Đây là luật không dựa vào nội dung nói gì. Kẻ spam đổi hết từ khoá, bỏ hết
+    link, viết lại cả bài vẫn dính - vì cái lộ ra không nằm trong một tin, mà
+    nằm ở chỗ nhiều tài khoản cùng đăng một thứ. Vân tay chịu được sửa vặt nên
+    xào lại vài chữ, hay nén lại tấm ảnh, cũng vẫn gộp chung.
+
+    Trả về (lý do, vân tay) nếu đủ thành chiến dịch, None nếu chưa.
+    """
+    if vt is None:
+        return None
+    db = _db(context)
+    vt, so_acc = await db.ghi_noi_dung(vt, mau, user_id, chat_id, loai)
+    if so_acc < nguong or await db.noi_dung_duoc_tha(vt, loai):
+        return None
+    cai_gi = "một tấm ảnh" if loai == "a" else "bài này"
+    return f"{so_acc} tài khoản khác nhau cùng đăng {cai_gi} (chiến dịch rải)", vt
+
+
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
     chat = update.effective_chat
@@ -946,6 +981,8 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     fwd_exempt = False
     # Khác None khi bắt được chiến dịch rải: dùng để hốt cả ổ sau khi ban.
     van_tay_chien_dich: int | None = None
+    loai_chien_dich = "t"
+    theo_doi_rai = False
 
     # --- Chống rải hàng loạt ---
     # Xét trước mọi thứ khác vì đây là luật về HÀNH VI, không phải nội dung:
@@ -969,27 +1006,16 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             force_punish = True
             force_reason = ly_do_rai
 
-        # Bộ nhớ nội dung xuyên nhóm: bài này đã có bao nhiêu tài khoản KHÁC
-        # NHAU đăng, ở bất kỳ nhóm nào, tính từ trước tới giờ?
-        #
-        # Đây là luật không dựa vào nội dung nói gì. Kẻ spam đổi hết từ khoá,
-        # bỏ hết link, viết lại cả bài vẫn dính - vì cái lộ ra không nằm trong
-        # một tin, mà nằm ở chỗ nhiều tài khoản cùng đăng một thứ. Vân tay
-        # chịu được sửa vặt nên xào lại vài chữ mỗi lần cũng vẫn gộp chung.
+        # Bộ nhớ nội dung xuyên nhóm - xem _xet_chien_dich.
         if not force_punish:
             chu_goc = " ".join(filter(None, [msg.text, msg.caption]))
-            vt_nd = vantay.van_tay(chu_goc)
-            if vt_nd is not None:
-                vt_nd, so_acc = await db.ghi_noi_dung(
-                    vt_nd, chu_goc, msg.from_user.id, chat.id
-                )
-                if so_acc >= cfg.raid_users and not await db.noi_dung_duoc_tha(vt_nd):
-                    force_punish = True
-                    force_reason = (
-                        f"{so_acc} tài khoản khác nhau cùng đăng bài này "
-                        f"(chiến dịch rải)"
-                    )
-                    van_tay_chien_dich = vt_nd
+            kq = await _xet_chien_dich(
+                context, vantay.van_tay(chu_goc), "t",
+                chu_goc, msg.from_user.id, chat.id, cfg.raid_users,
+            )
+            if kq:
+                force_punish, force_reason, van_tay_chien_dich = True, kq[0], kq[1]
+        theo_doi_rai = not force_punish
 
     is_new = False
     offences = 0
@@ -1002,7 +1028,19 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not force_punish:
             fwd_exempt = msg.from_user.id in rules.seeding
 
-    has_qr, qr_payloads, ocr_text = await _scan_image(msg, context)
+    has_qr, qr_payloads, ocr_text, vt_anh = await _scan_image(msg, context)
+
+    # Vân tay ẢNH: bắt chiến dịch rải bằng ảnh, thứ mà bộ nhớ chữ mù hoàn toàn.
+    # Ngưỡng cao hơn chữ một bậc: ba người cùng đăng lại một tấm meme trong
+    # nhóm đông là chuyện thường, ba người cùng gõ y hệt một đoạn chữ dài thì
+    # không.
+    if theo_doi_rai and vt_anh is not None:
+        kq = await _xet_chien_dich(
+            context, vt_anh, "a", "", msg.from_user.id, chat.id, cfg.raid_users_anh,
+        )
+        if kq:
+            force_punish, force_reason = True, kq[0]
+            van_tay_chien_dich, loai_chien_dich = kq[1], "a"
 
     # Người HỎI "nhóm này có lừa đảo không?" là người cẩn thận, không phải spam.
     # Chỉ miễn khi tin nhắn thuần chữ: không link, không ảnh, không QR, không @.
@@ -1060,6 +1098,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await db.log_offence(
         chat.id, uid, len(verdict.reasons), action, "; ".join(verdict.reasons),
         msg.text or msg.caption or "", ten or "",
+        van_tay_chien_dich or 0, loai_chien_dich if van_tay_chien_dich else "",
     )
     await _report(context, chat, msg, verdict, action)
 
@@ -1075,7 +1114,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Nếu đây là chiến dịch rải, hốt luôn những acc đã đăng cùng bài đó.
         if van_tay_chien_dich is not None:
             asyncio.create_task(
-                _hot_ca_o(context, van_tay_chien_dich, chat.id, uid)
+                _hot_ca_o(context, van_tay_chien_dich, loai_chien_dich, chat.id, uid)
             )
     if action in ("ban", "mute"):
         await _check_brake(context)
@@ -1322,7 +1361,7 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     offences = await db.count_offences(target.chat_id, uid) if uid else 0
     is_bl = await db.in_blacklist(target.chat_id, sender_id) if sender_id else False
     is_fwd = await db.in_fwd_whitelist(target.chat_id, uid) if uid else False
-    has_qr, qr_payloads, ocr_text = await _scan_image(target, context)
+    has_qr, qr_payloads, ocr_text, _vt_anh = await _scan_image(target, context)
     facts = _extract_facts(target, False, offences, has_qr, qr_payloads, ocr_text=ocr_text)
     verdict = analyse(facts, cfg)
     verdict_text = "SPAM" if verdict.is_spam else "sạch"
@@ -1411,24 +1450,27 @@ async def cmd_allow_content(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     chu = " ".join(filter(None, [goc.text, goc.caption]))
-    vt = vantay.van_tay(chu)
+    vt, loai, nhan = vantay.van_tay(chu), "t", f"<i>{html.escape(chu[:80])}</i>"
+    if vt is None and (goc.photo or goc.sticker):
+        # Reply vào một tấm ảnh thì tha chính tấm ảnh đó.
+        _, _, _, vt = await _scan_image(goc, context)
+        loai, nhan = "a", "🖼 tấm ảnh này"
     if vt is None:
         await _quiet_reply(
             update, context,
-            f"Tin này quá ngắn (dưới {vantay.TOI_THIEU} ký tự) nên vốn đã "
-            "không bị luật chiến dịch đụng tới.",
+            f"Tin này quá ngắn (dưới {vantay.TOI_THIEU} ký tự), hoặc là ảnh quá "
+            "phẳng để lấy vân tay — nên vốn đã không bị luật chiến dịch đụng tới.",
         )
         return
 
     # Bài này có thể đã được gộp vào một vân tay có sẵn (vì gần giống bài cũ).
     # Phải tha đúng vân tay ĐANG DÙNG, nếu không tha xong vẫn bị chặn.
     db = _db(context)
-    vt = await db.tim_van_tay(vt) or vt
-    await db.tha_noi_dung(vt)
+    vt = await db.tim_van_tay(vt, loai) or vt
+    await db.tha_noi_dung(vt, loai)
     await _quiet_reply(
         update, context,
-        "✅ Đã tha nội dung này — nhiều người cùng đăng cũng không bị chặn.\n"
-        f"<i>{html.escape(chu[:80])}</i>",
+        f"✅ Đã tha nội dung này — nhiều người cùng đăng cũng không bị chặn.\n{nhan}",
     )
 
 
@@ -1442,12 +1484,58 @@ async def cmd_campaigns(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _quiet_reply(update, context, "Chưa phát hiện chiến dịch rải nào.")
         return
     dong = [
-        f"<b>{n}</b> acc · {g} nhóm — <i>{html.escape((mau or '(ảnh)')[:60])}</i>"
-        for n, g, mau in cds
+        f"<b>{n}</b> acc · {g} nhóm — "
+        + (f"<i>{html.escape(mau[:60])}</i>" if loai == "t" else "🖼 một tấm ảnh")
+        for n, g, mau, loai in cds
     ]
     await _quiet_reply(
         update, context,
         "📡 <b>Chiến dịch rải đã nhận ra</b>\n" + "\n".join(dong),
+    )
+
+
+async def cmd_learned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Bot đã học được gì từ những lần bạn gỡ ban.
+
+    `/learned reset` xoá sạch bộ đếm, `/learned reset <tên luật>` xoá một luật.
+    """
+    if not await _require_admin(update, context):
+        return
+    db, cfg = _db(context), _cfg(context)
+
+    if context.args and context.args[0].lower() in ("reset", "xoa", "xoá"):
+        ten = " ".join(context.args[1:]).strip() or None
+        n = await db.xoa_phan_hoi(ten)
+        await _quiet_reply(update, context, f"Đã xoá {n} mục ghi nhớ.")
+        return
+
+    ph = await db.cac_phan_hoi(15)
+    if not ph:
+        await _quiet_reply(
+            update, context,
+            "Chưa học được gì — bạn chưa gỡ lượt ban nào.\n"
+            "Mỗi lần <code>/undo</code> là một phiếu “luật này bắt sai”.",
+        )
+        return
+
+    dong = []
+    for luat, so_lan, _khi, vi_du in ph:
+        ct = tuhoc.CONG_TAC_CUA_LUAT.get(luat)
+        con = max(0, cfg.tu_hoc_nguong - so_lan)
+        if not ct:
+            ghi = "— luật này bot không tự tắt được"
+        elif con:
+            ghi = f"— còn {con} lần nữa thì tự tắt <code>{ct}</code>"
+        else:
+            ghi = f"— đã đủ ngưỡng, <code>{ct}</code> sẽ tắt ở lần gỡ tới"
+        dong.append(f"• <b>{html.escape(luat)}</b>: gỡ {so_lan} lần {ghi}")
+        if vi_du:
+            dong.append(f"   <i>{html.escape(vi_du[:60])}</i>")
+
+    await _quiet_reply(
+        update, context,
+        f"🧠 <b>Bot học từ {len(ph)} luật bạn từng gỡ</b>"
+        f" (ngưỡng tự tắt: {cfg.tu_hoc_nguong})\n" + "\n".join(dong),
     )
 
 
@@ -2458,7 +2546,7 @@ async def _bans_text(context: ContextTypes.DEFAULT_TYPE, limit: int = 10) -> str
     if not rows:
         return "Chưa có lượt xử lý nào."
     ra = ["<b>Các lượt xử lý gần nhất</b>\n"]
-    for _id, chat_id, uid, ts, score, reasons, excerpt, name in rows:
+    for _id, chat_id, uid, ts, score, reasons, excerpt, name, _vt, _lo in rows:
         khi = datetime.fromtimestamp(ts).strftime("%H:%M %d/%m")
         ai = html.escape(name) if name else f"<code>{uid}</code>"
         ly_do = html.escape(reasons[:90])
@@ -2484,17 +2572,66 @@ async def _undo_last(context: ContextTypes.DEFAULT_TYPE) -> str:
     rows = await _db(context).recent_bans(1)
     if not rows:
         return "Chưa có lượt ban nào để gỡ."
-    _id, chat_id, uid, ts, score, reasons, excerpt, name = rows[0]
+    _id, chat_id, uid, ts, score, reasons, excerpt, name, vt, loai_vt = rows[0]
     ai = html.escape(name) if name else str(uid)
     try:
         await context.bot.unban_chat_member(chat_id, uid, only_if_banned=True)
         await _db(context).clear_offences(chat_id, uid)
-        return (
-            f"↩️ Đã gỡ <b>{ai}</b> (<code>{uid}</code>) và xoá lịch sử vi phạm.\n"
-            f"Lý do bị ban: {html.escape(reasons[:120])}"
-        )
     except TelegramError as exc:
         return f"Không gỡ được <code>{uid}</code>: {html.escape(str(exc))}"
+
+    hoc = await _hoc_tu_go(context, reasons, excerpt, vt, loai_vt)
+    return (
+        f"↩️ Đã gỡ <b>{ai}</b> (<code>{uid}</code>) và xoá lịch sử vi phạm.\n"
+        f"Lý do bị ban: {html.escape(reasons[:120])}" + hoc
+    )
+
+
+async def _hoc_tu_go(
+    context: ContextTypes.DEFAULT_TYPE, reasons: str, excerpt: str,
+    vt: int, loai_vt: str,
+) -> str:
+    """Học từ một lần gỡ ban. Trả về đoạn kể lại bot đã học được gì.
+
+    Xem tuhoc.py để hiểu vì sao chỉ đếm-và-tắt chứ không học trọng số.
+    """
+    db, cfg = _db(context), _cfg(context)
+    if not cfg.tu_hoc:
+        return ""
+
+    ke: list[str] = []
+
+    # 1. Tha ngay ĐÚNG nội dung vừa bắt sai. Hành động hẹp nên gần như không
+    # thể sai: chỉ đụng tới bài mà admin vừa tự tay tuyên là oan.
+    vt_tha, loai_tha = (vantay.tu_sqlite(vt), loai_vt or "t") if vt else (None, "t")
+    if vt_tha is None and excerpt and "chiến dịch" in reasons:
+        vt_chu = vantay.van_tay(excerpt)
+        if vt_chu is not None:
+            vt_tha = await db.tim_van_tay(vt_chu) or vt_chu
+    if vt_tha is not None:
+        await db.tha_noi_dung(vt_tha, loai_tha)
+        ke.append("đã tha nội dung này — lần sau ai đăng lại cũng không bị bắt")
+
+    # 2. Đếm phiếu cho từng luật; tới ngưỡng thì tự tắt công tắc tương ứng.
+    for luat in tuhoc.ten_luat(reasons):
+        so_lan = await db.ghi_phan_hoi(luat, excerpt)
+        cong_tac = tuhoc.CONG_TAC_CUA_LUAT.get(luat)
+        if so_lan < cfg.tu_hoc_nguong or not cong_tac:
+            continue
+        if not await control.get_flag(db, cfg, cong_tac):
+            continue  # đã tắt sẵn rồi
+        await control.set_flag(db, cong_tac, False)
+        await db.xoa_phan_hoi(luat)
+        loi = (
+            f"Luật <b>{html.escape(luat)}</b> đã bị gỡ {so_lan} lần → "
+            f"đã <b>TẮT</b> công tắc <code>{cong_tac}</code>. Bật lại trong /panel."
+        )
+        ke.append(loi)
+        log.warning(
+            "TU HOC: tat cong tac %s sau %d lan go ban vi '%s'.", cong_tac, so_lan, luat
+        )
+
+    return ("\n🧠 " + "\n🧠 ".join(ke)) if ke else ""
 
 
 async def cmd_undo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3391,6 +3528,7 @@ _GROUP_ADMIN_CMDS = [
     BotCommand("check", "Thử xem tin nhắn có bị chặn không (reply)"),
     BotCommand("campaigns", "Xem các chiến dịch rải đã nhận ra"),
     BotCommand("allow_content", "Tha một nội dung hay bị đăng lại (reply)"),
+    BotCommand("learned", "Bot học được gì từ những lần bạn gỡ ban"),
     BotCommand("trust", "Tin cậy hoàn toàn (reply hoặc id)"),
     BotCommand("unban", "Gỡ chặn người dùng"),
     BotCommand("id", "Xem chat_id / user_id"),
@@ -3772,6 +3910,7 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler("trust", cmd_trust))
     app.add_handler(CommandHandler(["allow_content", "tha_noidung"], cmd_allow_content))
     app.add_handler(CommandHandler(["campaigns", "chien_dich"], cmd_campaigns))
+    app.add_handler(CommandHandler(["learned", "da_hoc"], cmd_learned))
     app.add_handler(CommandHandler("unban", cmd_unban))
     # Acc seeding
     app.add_handler(CommandHandler(["add_user", "adduser"], cmd_adduser))

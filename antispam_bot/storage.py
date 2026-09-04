@@ -94,20 +94,26 @@ CREATE TABLE IF NOT EXISTS keyword_blacklist (
 -- Bộ nhớ nội dung, dùng cho luật "nhiều tài khoản cùng đăng một bài".
 -- Cố ý KHÔNG có chat_id ở bảng noi_dung: chiến dịch rải trải khắp mọi nhóm,
 -- đếm riêng từng nhóm là mù trước đúng thứ nguy hiểm nhất.
+-- loai: 't' = vân tay chữ (SimHash), 'a' = vân tay ảnh (pHash). Hai loại
+-- dùng chung bảng vì cùng khuôn 64 bit và cùng cách tra băng, nhưng KHÔNG BAO
+-- GIỜ được lẫn nhau - nên loại nằm trong khoá chính.
 CREATE TABLE IF NOT EXISTS noi_dung (
-    van_tay  INTEGER PRIMARY KEY,
+    van_tay  INTEGER NOT NULL,
+    loai     TEXT    NOT NULL DEFAULT 't',
     mau      TEXT    NOT NULL DEFAULT '',
-    lan_cuoi INTEGER NOT NULL
+    lan_cuoi INTEGER NOT NULL,
+    PRIMARY KEY (van_tay, loai)
 );
 
--- Ai đã đăng bài đó, ở nhóm nào. Khoá chính (van_tay, user_id) nên một người
+-- Ai đã đăng bài đó, ở nhóm nào. Khoá chính có user_id nên một người
 -- đăng lại mười lần vẫn chỉ tính là một tài khoản.
 CREATE TABLE IF NOT EXISTS noi_dung_acc (
     van_tay INTEGER NOT NULL,
+    loai    TEXT    NOT NULL DEFAULT 't',
     user_id INTEGER NOT NULL,
     chat_id INTEGER NOT NULL,
     ts      INTEGER NOT NULL,
-    PRIMARY KEY (van_tay, user_id)
+    PRIMARY KEY (van_tay, loai, user_id)
 );
 
 -- Chỉ mục băng, để tra vân tay GẦN GIỐNG mà không phải quét cả bảng.
@@ -116,13 +122,24 @@ CREATE TABLE IF NOT EXISTS noi_dung_bang (
     bang    INTEGER NOT NULL,
     khoa    INTEGER NOT NULL,
     van_tay INTEGER NOT NULL,
-    PRIMARY KEY (bang, khoa, van_tay)
+    loai    TEXT    NOT NULL DEFAULT 't',
+    PRIMARY KEY (bang, khoa, van_tay, loai)
 );
 
 -- Nội dung admin đã tha: nhóm có thể có bài đăng lặp lại hợp lệ (nội quy,
 -- thông báo định kỳ) mà nhiều người cùng chép lại.
 CREATE TABLE IF NOT EXISTS noi_dung_tha (
-    van_tay INTEGER PRIMARY KEY
+    van_tay INTEGER NOT NULL,
+    loai    TEXT    NOT NULL DEFAULT 't',
+    PRIMARY KEY (van_tay, loai)
+);
+
+-- Mỗi lần admin gỡ ban là một phiếu "luật này bắt sai". Xem tuhoc.py.
+CREATE TABLE IF NOT EXISTS phan_hoi (
+    luat     TEXT PRIMARY KEY,
+    so_lan   INTEGER NOT NULL DEFAULT 0,
+    lan_cuoi INTEGER NOT NULL,
+    vi_du    TEXT    NOT NULL DEFAULT ''
 );
 """
 
@@ -149,11 +166,29 @@ class Storage:
         CREATE TABLE IF NOT EXISTS không đụng tới bảng đã có, nên cột thêm sau
         phải tự vá ở đây - nếu không, database cũ sẽ thiếu cột và sập.
         """
+        # Bộ nhớ nội dung là bộ NHỚ TẠM có thể dựng lại, không phải dữ liệu
+        # gốc. Bản cũ chưa có cột `loai` (chưa phân biệt vân tay chữ với vân
+        # tay ảnh) nên dựng lại từ đầu, gọn hơn nhiều so với vá từng dòng.
+        nd = {r[1] for r in self._conn.execute("PRAGMA table_info(noi_dung)")}
+        if nd and "loai" not in nd:
+            for bang in ("noi_dung_acc", "noi_dung_bang", "noi_dung_tha", "noi_dung"):
+                self._conn.execute(f"DROP TABLE IF EXISTS {bang}")
+            self._conn.executescript(SCHEMA)
+
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(offences)")}
         if "name" not in cols:
             # Lưu tên người bị xử lý để /lastbans đọc được, khỏi phải gọi API.
             self._conn.execute(
                 "ALTER TABLE offences ADD COLUMN name TEXT NOT NULL DEFAULT ''"
+            )
+        if "van_tay" not in cols:
+            # Vân tay nội dung lúc bị ban, để /undo tha được đúng thứ đã bắt
+            # sai - nhất là với ảnh, vốn không có chữ nào để dựng lại vân tay.
+            self._conn.execute(
+                "ALTER TABLE offences ADD COLUMN van_tay INTEGER NOT NULL DEFAULT 0"
+            )
+            self._conn.execute(
+                "ALTER TABLE offences ADD COLUMN loai_vt TEXT NOT NULL DEFAULT ''"
             )
 
     def close(self) -> None:
@@ -245,26 +280,29 @@ class Storage:
 
     def _log_offence(
         self, chat_id: int, user_id: int, score: int, action: str,
-        reasons: str, excerpt: str, name: str,
+        reasons: str, excerpt: str, name: str, van_tay: int, loai_vt: str,
     ) -> None:
         self._conn.execute(
-            "INSERT INTO offences (chat_id, user_id, ts, score, action, reasons, excerpt, name) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (chat_id, user_id, int(time.time()), score, action, reasons, excerpt[:400], name[:80]),
+            "INSERT INTO offences (chat_id, user_id, ts, score, action, reasons,"
+            " excerpt, name, van_tay, loai_vt) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (chat_id, user_id, int(time.time()), score, action, reasons,
+             excerpt[:400], name[:80], sang_sqlite(van_tay) if van_tay else 0, loai_vt),
         )
         self._conn.commit()
 
     async def log_offence(
         self, chat_id: int, user_id: int, score: int, action: str,
         reasons: str, excerpt: str = "", name: str = "",
+        van_tay: int = 0, loai_vt: str = "",
     ) -> None:
         await self._run(
-            self._log_offence, chat_id, user_id, score, action, reasons, excerpt, name
+            self._log_offence, chat_id, user_id, score, action, reasons, excerpt,
+            name, van_tay, loai_vt,
         )
 
     def _recent_bans(self, limit: int) -> list[tuple]:
         cur = self._conn.execute(
-            "SELECT id, chat_id, user_id, ts, score, reasons, excerpt, name "
+            "SELECT id, chat_id, user_id, ts, score, reasons, excerpt, name, van_tay, loai_vt "
             "FROM offences WHERE action IN ('ban','mute') ORDER BY ts DESC, id DESC LIMIT ?",
             (limit,),
         )
@@ -712,7 +750,7 @@ class Storage:
     # bị dồn quá nhiều nội dung làm chậm mọi tin nhắn.
     _TRAN_UNG_VIEN = 200
 
-    def _tim_gan_giong(self, vt: int) -> int | None:
+    def _tim_gan_giong(self, vt: int, loai: str = "t") -> int | None:
         """Vân tay đã có nào gần giống vt nhất? None nếu chưa từng thấy."""
         # Một truy vấn cho cả 8 băng, không phải 8 lượt: đo được nhanh hơn 3
         # lần, vì mỗi lượt gọi SQLite đều mất chi phí cố định.
@@ -722,16 +760,16 @@ class Storage:
         for b, k in bang:
             tham += [b, k]
         cur = self._conn.execute(
-            f"SELECT DISTINCT van_tay FROM noi_dung_bang WHERE (bang,khoa) IN"
+            f"SELECT DISTINCT van_tay FROM noi_dung_bang WHERE loai=? AND (bang,khoa) IN"
             f" (VALUES {cho}) LIMIT ?",
-            (*tham, self._TRAN_UNG_VIEN),
+            (loai, *tham, self._TRAN_UNG_VIEN),
         )
         ung_vien = {tu_sqlite(v) for (v,) in cur}
         gan = [u for u in ung_vien if giong_nhau(vt, u)]
         return min(gan, key=lambda u: lech(vt, u)) if gan else None
 
     def _ghi_noi_dung(
-        self, vt: int, mau: str, user_id: int, chat_id: int
+        self, vt: int, mau: str, user_id: int, chat_id: int, loai: str = "t"
     ) -> tuple[int, int]:
         """Ghi nhận một lần đăng. Trả về (vân tay gộp, số tài khoản đã đăng).
 
@@ -739,85 +777,93 @@ class Storage:
         vài chữ mỗi lần đăng vẫn bị đếm chung một chiến dịch.
         """
         now = int(time.time())
-        chinh = self._tim_gan_giong(vt)
+        chinh = self._tim_gan_giong(vt, loai)
         if chinh is None:
             chinh = vt
             self._conn.execute(
-                "INSERT OR IGNORE INTO noi_dung (van_tay, mau, lan_cuoi) VALUES (?,?,?)",
-                (sang_sqlite(chinh), mau[:200], now),
+                "INSERT OR IGNORE INTO noi_dung (van_tay, loai, mau, lan_cuoi)"
+                " VALUES (?,?,?,?)",
+                (sang_sqlite(chinh), loai, mau[:200], now),
             )
             self._conn.executemany(
-                "INSERT OR IGNORE INTO noi_dung_bang (bang, khoa, van_tay) VALUES (?,?,?)",
-                [(b, k, sang_sqlite(chinh)) for b, k in cac_bang(chinh)],
+                "INSERT OR IGNORE INTO noi_dung_bang (bang, khoa, van_tay, loai)"
+                " VALUES (?,?,?,?)",
+                [(b, k, sang_sqlite(chinh), loai) for b, k in cac_bang(chinh)],
             )
         else:
             self._conn.execute(
-                "UPDATE noi_dung SET lan_cuoi=? WHERE van_tay=?",
-                (now, sang_sqlite(chinh)),
+                "UPDATE noi_dung SET lan_cuoi=? WHERE van_tay=? AND loai=?",
+                (now, sang_sqlite(chinh), loai),
             )
 
         self._conn.execute(
-            "INSERT OR IGNORE INTO noi_dung_acc (van_tay, user_id, chat_id, ts)"
-            " VALUES (?,?,?,?)",
-            (sang_sqlite(chinh), user_id, chat_id, now),
+            "INSERT OR IGNORE INTO noi_dung_acc (van_tay, loai, user_id, chat_id, ts)"
+            " VALUES (?,?,?,?,?)",
+            (sang_sqlite(chinh), loai, user_id, chat_id, now),
         )
         self._conn.commit()
         cur = self._conn.execute(
-            "SELECT COUNT(*) FROM noi_dung_acc WHERE van_tay=?", (sang_sqlite(chinh),)
+            "SELECT COUNT(*) FROM noi_dung_acc WHERE van_tay=? AND loai=?",
+            (sang_sqlite(chinh), loai),
         )
         return chinh, int(cur.fetchone()[0])
 
     async def ghi_noi_dung(
-        self, vt: int, mau: str, user_id: int, chat_id: int
+        self, vt: int, mau: str, user_id: int, chat_id: int, loai: str = "t"
     ) -> tuple[int, int]:
-        return await self._run(self._ghi_noi_dung, vt, mau, user_id, chat_id)
+        return await self._run(self._ghi_noi_dung, vt, mau, user_id, chat_id, loai)
 
-    def _acc_cua_noi_dung(self, vt: int) -> list[tuple[int, int]]:
+    def _acc_cua_noi_dung(self, vt: int, loai: str = "t") -> list[tuple[int, int]]:
         cur = self._conn.execute(
-            "SELECT user_id, chat_id FROM noi_dung_acc WHERE van_tay=?", (sang_sqlite(vt),)
+            "SELECT user_id, chat_id FROM noi_dung_acc WHERE van_tay=? AND loai=?",
+            (sang_sqlite(vt), loai),
         )
         return [(int(u), int(c)) for u, c in cur.fetchall()]
 
-    async def acc_cua_noi_dung(self, vt: int) -> list[tuple[int, int]]:
-        return await self._run(self._acc_cua_noi_dung, vt)
+    async def acc_cua_noi_dung(self, vt: int, loai: str = "t") -> list[tuple[int, int]]:
+        return await self._run(self._acc_cua_noi_dung, vt, loai)
 
-    async def tim_van_tay(self, vt: int) -> int | None:
+    async def tim_van_tay(self, vt: int, loai: str = "t") -> int | None:
         """Vân tay đang dùng cho nội dung này, không ghi thêm lượt đăng nào."""
-        return await self._run(self._tim_gan_giong, vt)
+        return await self._run(self._tim_gan_giong, vt, loai)
 
-    def _cac_chien_dich(self, toi_thieu: int, gioi_han: int) -> list[tuple[int, int, str]]:
+    def _cac_chien_dich(
+        self, toi_thieu: int, gioi_han: int
+    ) -> list[tuple[int, int, str, str]]:
         cur = self._conn.execute(
-            "SELECT COUNT(*) n, COUNT(DISTINCT a.chat_id) g, d.mau"
-            " FROM noi_dung_acc a JOIN noi_dung d ON d.van_tay = a.van_tay"
-            " WHERE a.van_tay NOT IN (SELECT van_tay FROM noi_dung_tha)"
-            " GROUP BY a.van_tay HAVING n >= ? ORDER BY n DESC LIMIT ?",
+            "SELECT COUNT(*) n, COUNT(DISTINCT a.chat_id) g, d.mau, d.loai"
+            " FROM noi_dung_acc a"
+            " JOIN noi_dung d ON d.van_tay = a.van_tay AND d.loai = a.loai"
+            " WHERE (a.van_tay, a.loai) NOT IN (SELECT van_tay, loai FROM noi_dung_tha)"
+            " GROUP BY a.van_tay, a.loai HAVING n >= ? ORDER BY n DESC LIMIT ?",
             (toi_thieu, gioi_han),
         )
-        return [(int(n), int(g), m or "") for n, g, m in cur.fetchall()]
+        return [(int(n), int(g), m or "", lo) for n, g, m, lo in cur.fetchall()]
 
     async def cac_chien_dich(
         self, toi_thieu: int = 3, gioi_han: int = 10
-    ) -> list[tuple[int, int, str]]:
+    ) -> list[tuple[int, int, str, str]]:
         return await self._run(self._cac_chien_dich, toi_thieu, gioi_han)
 
-    def _noi_dung_duoc_tha(self, vt: int) -> bool:
+    def _noi_dung_duoc_tha(self, vt: int, loai: str = "t") -> bool:
         cur = self._conn.execute(
-            "SELECT 1 FROM noi_dung_tha WHERE van_tay=?", (sang_sqlite(vt),)
+            "SELECT 1 FROM noi_dung_tha WHERE van_tay=? AND loai=?", (sang_sqlite(vt), loai)
         )
         return cur.fetchone() is not None
 
-    async def noi_dung_duoc_tha(self, vt: int) -> bool:
-        return await self._run(self._noi_dung_duoc_tha, vt)
+    async def noi_dung_duoc_tha(self, vt: int, loai: str = "t") -> bool:
+        return await self._run(self._noi_dung_duoc_tha, vt, loai)
 
-    def _tha_noi_dung(self, vt: int) -> None:
+    def _tha_noi_dung(self, vt: int, loai: str = "t") -> None:
         """Đánh dấu một nội dung là hợp lệ, kể cả khi nhiều người cùng đăng."""
         self._conn.execute(
-            "INSERT OR IGNORE INTO noi_dung_tha (van_tay) VALUES (?)", (sang_sqlite(vt),)
+            "INSERT OR IGNORE INTO noi_dung_tha (van_tay, loai) VALUES (?,?)",
+            (sang_sqlite(vt), loai),
         )
         self._conn.commit()
 
-    async def tha_noi_dung(self, vt: int) -> None:
-        await self._run(self._tha_noi_dung, vt)
+    async def tha_noi_dung(self, vt: int, loai: str = "t") -> None:
+        await self._run(self._tha_noi_dung, vt, loai)
 
     def _don_noi_dung(self, giu_ngay: int) -> int:
         """Xoá nội dung cũ không thành chiến dịch, để bảng không phình mãi.
@@ -828,19 +874,61 @@ class Storage:
         """
         han = int(time.time()) - giu_ngay * 86400
         cur = self._conn.execute(
-            "SELECT van_tay FROM noi_dung WHERE lan_cuoi < ? AND van_tay NOT IN"
-            " (SELECT van_tay FROM noi_dung_acc GROUP BY van_tay HAVING COUNT(*) > 1)",
+            "SELECT van_tay, loai FROM noi_dung WHERE lan_cuoi < ? AND (van_tay, loai)"
+            " NOT IN (SELECT van_tay, loai FROM noi_dung_acc"
+            "         GROUP BY van_tay, loai HAVING COUNT(*) > 1)",
             (han,),
         )
-        cu = [r[0] for r in cur.fetchall()]
+        cu = cur.fetchall()
         if not cu:
             return 0
         for bang in ("noi_dung_acc", "noi_dung_bang", "noi_dung"):
             self._conn.executemany(
-                f"DELETE FROM {bang} WHERE van_tay=?", [(v,) for v in cu]
+                f"DELETE FROM {bang} WHERE van_tay=? AND loai=?", cu
             )
         self._conn.commit()
         return len(cu)
 
     async def don_noi_dung(self, giu_ngay: int = 30) -> int:
         return await self._run(self._don_noi_dung, giu_ngay)
+
+    # -- tự học từ những lần gỡ ban ----------------------------------------
+
+    def _ghi_phan_hoi(self, luat: str, vi_du: str) -> int:
+        """Ghi một phiếu "luật này bắt sai". Trả về tổng số phiếu của luật đó."""
+        now = int(time.time())
+        self._conn.execute(
+            "INSERT INTO phan_hoi (luat, so_lan, lan_cuoi, vi_du) VALUES (?,1,?,?)"
+            " ON CONFLICT(luat) DO UPDATE SET"
+            " so_lan = so_lan + 1, lan_cuoi = excluded.lan_cuoi,"
+            " vi_du = CASE WHEN excluded.vi_du != '' THEN excluded.vi_du ELSE vi_du END",
+            (luat, now, vi_du[:160]),
+        )
+        self._conn.commit()
+        cur = self._conn.execute("SELECT so_lan FROM phan_hoi WHERE luat=?", (luat,))
+        return int(cur.fetchone()[0])
+
+    async def ghi_phan_hoi(self, luat: str, vi_du: str = "") -> int:
+        return await self._run(self._ghi_phan_hoi, luat, vi_du)
+
+    def _cac_phan_hoi(self, gioi_han: int) -> list[tuple[str, int, int, str]]:
+        cur = self._conn.execute(
+            "SELECT luat, so_lan, lan_cuoi, vi_du FROM phan_hoi"
+            " ORDER BY so_lan DESC, lan_cuoi DESC LIMIT ?",
+            (gioi_han,),
+        )
+        return [(l, int(n), int(t), v) for l, n, t, v in cur.fetchall()]
+
+    async def cac_phan_hoi(self, gioi_han: int = 15) -> list[tuple[str, int, int, str]]:
+        return await self._run(self._cac_phan_hoi, gioi_han)
+
+    def _xoa_phan_hoi(self, luat: str | None) -> int:
+        if luat is None:
+            cur = self._conn.execute("DELETE FROM phan_hoi")
+        else:
+            cur = self._conn.execute("DELETE FROM phan_hoi WHERE luat=?", (luat,))
+        self._conn.commit()
+        return cur.rowcount
+
+    async def xoa_phan_hoi(self, luat: str | None = None) -> int:
+        return await self._run(self._xoa_phan_hoi, luat)

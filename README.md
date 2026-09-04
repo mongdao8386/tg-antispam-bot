@@ -120,7 +120,8 @@ những tin mà đọc riêng từng cái thì hoàn toàn vô hại.
 |---|---|---|
 | Dồn tin | Một người gửi 10 tin trong 10 giây | bộ nhớ tạm |
 | Lặp lại | Một người gửi lại cùng nội dung 4 lần trong 2 phút | bộ nhớ tạm |
-| **Chiến dịch** | **3 tài khoản khác nhau cùng đăng một bài** | **database** |
+| **Chiến dịch (chữ)** | **3 tài khoản khác nhau cùng đăng một bài** | **database** |
+| **Chiến dịch (ảnh)** | **4 tài khoản khác nhau cùng đăng một tấm ảnh** | **database** |
 
 ### Chiến dịch: thứ bot khác không thấy
 
@@ -167,6 +168,62 @@ Ngưỡng đặt ở 6 bit — nằm giữa hai vùng, cách xa cả hai bên.
 Tra cứu vân tay gần giống mà không quét cả bảng: cắt 64 bit thành 8 băng rồi
 đánh chỉ mục từng băng. Theo nguyên lý chuồng bồ câu, hai vân tay lệch không quá
 7 bit thì chắc chắn có ít nhất một băng trùng khít — nên chỉ cần tra khoá chính.
+
+### Vân tay ảnh: chiến dịch không có một chữ nào
+
+19% số lượt ban không có chữ — ảnh, QR, forward. Bộ nhớ chữ mù hoàn toàn trước
+kiểu rải bằng ảnh, mà `file_unique_id` của Telegram thì vô dụng: tải lên lại là
+có mã mới, dù mắt người nhìn vẫn đúng tấm đó.
+
+Nay dùng **pHash**: đưa ảnh về xám 32×32, DCT, lấy góc trên trái 8×8 — phần
+chứa những nét *lớn* của ảnh — rồi so từng hệ số với trung vị.
+
+| Biến dạng | Lệch |
+|---|---|
+| Nén JPEG q=15, thu nhỏ ½, phóng to 150%, chỉnh sáng | **0 bit** |
+| Chèn thêm chữ ở góc | 0 bit |
+| Cắt viền 5% | 14 bit — **không nhận ra** |
+| Hai ảnh khác nhau | 16–26 bit |
+
+Cắt xén thì thua, đó là giới hạn đã biết của pHash. Bù lại nén và đổi kích
+thước — hai thứ Telegram tự làm mỗi lần tải lên — không hề ảnh hưởng.
+
+**Ảnh phẳng bị bỏ qua.** Ảnh gần một màu cho vân tay vô nghĩa và đụng nhau hàng
+loạt; bot đo độ tương phản trước, dưới ngưỡng thì không lấy vân tay. Thà bỏ lọt
+còn hơn gộp ba tấm ảnh trắng của ba người thành một "chiến dịch".
+
+**Ngưỡng ảnh cao hơn chữ một bậc** (`RAID_USERS_ANH=4`): ba người cùng đăng lại
+một tấm meme là chuyện thường, ba người cùng gõ y hệt một đoạn chữ dài thì
+không. Hai loại vân tay dùng chung bảng nhưng `loai` nằm trong khoá chính nên
+**không bao giờ lẫn nhau** — có test khoá lại điều đó.
+
+### Tự học từ những lần bạn gỡ ban
+
+Mỗi lần bạn gõ `/undo` là bạn đang nói *"luật này bắt sai"*. Đó là dữ liệu quý
+nhất bot có — đúng nhóm, đúng người, đúng kiểu tin nhắn của bạn. Trước đây nó bị
+vứt đi.
+
+Nay bot làm hai việc:
+
+**1. Tha ngay cái vừa bắt sai.** Gỡ một lượt ban vì chiến dịch rải thì bot tha
+luôn nội dung (hoặc tấm ảnh) đó — lần sau ai đăng lại cũng không bị. Hành động
+hẹp, chỉ đụng đúng bài bạn vừa tuyên là oan.
+
+**2. Tự tắt luật bắt sai quá nhiều.** Một luật bị gỡ đủ `TU_HOC_NGUONG` lần
+(mặc định 5) là nó không hợp với nhóm của bạn — bot tự tắt công tắc tương ứng và
+báo rõ trong terminal lẫn tin trả lời.
+
+Ranh giới cố ý hẹp: **bot chỉ tắt được những công tắc mà chính bạn cũng bật lại
+được bằng tay trong `/panel`**. Nó không tự nghĩ ra luật mới, không nới lỏng thứ
+gì nằm ngoài tầm tay bạn — có test khoá lại đúng điều kiện đó. Từ khoá tự đặt
+thì bot chỉ đếm và báo, việc bỏ từ nào là quyết định của bạn.
+
+`/learned` xem bot đã học gì và còn mấy lần nữa thì một luật bị tắt.
+`/learned reset` xoá sạch bộ đếm. Tắt hẳn bằng `TU_HOC=false`.
+
+Vì sao không học trọng số như học máy: đã bỏ hệ thống điểm số vì nó không giải
+thích được, học ra một mớ trọng số cũng y hệt vậy mà còn khó đoán hơn. Đếm và
+tắt thì đọc log là hiểu ngay chuyện gì đã xảy ra.
 
 ### Nhân đôi chữ cái — chiêu né rẻ nhất
 
@@ -329,13 +386,16 @@ antispam_bot/
   detector.py   từ khoá + regex + luật dứt khoát  ← chỉnh ở đây khi muốn thêm luật
   ngucanh.py    xét ngữ cảnh quanh từ cấm trước khi kết luận
   raivai.py     chống rải hàng loạt (dồn tin / lặp / phối hợp)
-  vantay.py     vân tay nội dung chịu được sửa đổi nhỏ (SimHash)
+  vantay.py     vân tay chữ chịu được sửa đổi nhỏ (SimHash)
+  anhhash.py    vân tay ảnh chịu được nén/thu nhỏ (pHash)
+  tuhoc.py      học từ những lần admin gỡ ban
   qrscan.py     giải mã QR trong ảnh (OpenCV, tuỳ chọn)
   storage.py    SQLite: thành viên mới, lịch sử vi phạm, whitelist theo nhóm
   bot.py        handler Telegram, thực thi hình phạt, lệnh quản trị
   __main__.py   khởi chạy
 tests/
   test_vantay.py
+  test_tuhoc.py
   test_detector.py
 ```
 

@@ -160,8 +160,8 @@ def test_liet_ke_chien_dich():
         db._ghi_noi_dung(van_tay(BAI), BAI, uid, -100 * uid)
     cds = db._cac_chien_dich(3, 10)
     assert len(cds) == 1
-    so_acc, so_nhom, _ = cds[0]
-    assert (so_acc, so_nhom) == (4, 4), cds
+    so_acc, so_nhom, _, loai = cds[0]
+    assert (so_acc, so_nhom, loai) == (4, 4, "t"), cds
 
     # Tha rồi thì không còn bị coi là chiến dịch nữa.
     db._tha_noi_dung(van_tay(BAI))
