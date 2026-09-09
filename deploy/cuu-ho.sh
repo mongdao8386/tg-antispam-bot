@@ -31,11 +31,17 @@ echo " Cứu hộ SSH cho VPS"
 echo "=============================================="
 
 # --- 1. Tìm và mount phân vùng gốc ------------------------------------------
+TU_MOUNT=1
+GOC=""
+# Hostinger Emergency mode đã mount sẵn đĩa VPS vào /mnt - dùng luôn, đừng
+# mount lại (mount hai lần cùng một phân vùng là rước lỗi).
+if [ -d /mnt/etc/ssh ]; then
+    MNT=/mnt; GOC="(đã mount sẵn ở /mnt bởi hệ cứu hộ)"; TU_MOUNT=0
+fi
 vgchange -ay >/dev/null 2>&1 || true          # bật LVM nếu có
 mkdir -p "$MNT"
-GOC=""
 # Thử từng phân vùng có hệ thống file Linux; cái nào có /etc/ssh là gốc.
-while read -r DEV FS; do
+[ -n "$GOC" ] || while read -r DEV FS; do
     [ -n "$FS" ] || continue
     case "$FS" in ext4|ext3|xfs|btrfs) ;; *) continue ;; esac
     mountpoint -q "$MNT" && umount "$MNT" 2>/dev/null
@@ -94,7 +100,9 @@ echo " ✓ Khoá đã nằm trong /root/.ssh/authorized_keys ($(wc -l < "$MNT/ro
 
 # --- 5. Xong -------------------------------------------------------------------
 sync
-umount "$MNT" 2>/dev/null && echo " ✓ Đã tháo $MNT"
+if [ "$TU_MOUNT" = 1 ]; then
+    umount "$MNT" 2>/dev/null && echo " ✓ Đã tháo $MNT"
+fi
 echo
 echo "=============================================="
 echo " XONG. Giờ vào hPanel TẮT recovery mode để máy khởi động lại bình thường."
