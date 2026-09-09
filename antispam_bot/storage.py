@@ -972,3 +972,24 @@ class Storage:
 
     async def ghi_qua_captcha(self, user_id: int) -> None:
         await self._run(self._ghi_qua_captcha, user_id)
+
+    # -- sao lưu -----------------------------------------------------------
+
+    def _sao_luu(self, thu_muc: Path, giu: int) -> Path:
+        """Chép database sang một file theo ngày, giữ lại `giu` bản gần nhất.
+
+        VACUUM INTO tạo bản sao nhất quán ngay cả khi bot đang ghi - không
+        cần dừng bot, không cần khoá.
+        """
+        thu_muc.mkdir(parents=True, exist_ok=True)
+        tep = thu_muc / time.strftime("antispam-%Y%m%d.db")
+        if tep.exists():
+            tep.unlink()
+        self._conn.execute("VACUUM INTO ?", (str(tep),))
+        cu = sorted(thu_muc.glob("antispam-*.db"))[:-giu] if giu > 0 else []
+        for f in cu:
+            f.unlink(missing_ok=True)
+        return tep
+
+    async def sao_luu(self, thu_muc: Path, giu: int = 14) -> Path:
+        return await self._run(self._sao_luu, thu_muc, giu)

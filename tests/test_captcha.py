@@ -73,6 +73,37 @@ def test_nho_nguoi_da_qua_xuyen_nhom():
     assert not db._da_qua_captcha(9, NHO_NGAY)
 
 
+def test_dot_vao_don_dap():
+    """Đếm lượt vào trong cửa sổ trượt; ngoài cửa sổ thì rơi ra."""
+    from collections import deque
+    from antispam_bot.captcha import CUA_SO_DOT_VAO, ghi_luot_vao
+    hang: deque = deque()
+    for i in range(7):
+        n = ghi_luot_vao(hang, 1000 + i, CUA_SO_DOT_VAO)
+    assert n == 7
+    # Quá cửa sổ: 7 lượt cũ rơi hết, chỉ còn lượt mới.
+    assert ghi_luot_vao(hang, 1000 + CUA_SO_DOT_VAO + 10, CUA_SO_DOT_VAO) == 1
+
+
+def test_sao_luu_tao_file_va_giu_dung_so_ban():
+    """Sao lưu phải ra file mở được, và không giữ quá số bản cho phép."""
+    import sqlite3
+    db = _db()
+    db._set_trusted(-1, 42, True)
+    thu_muc = Path(tempfile.mkdtemp()) / "backup"
+    # Giả vờ đã có nhiều bản cũ.
+    thu_muc.mkdir()
+    for d in ("20250101", "20250102", "20250103"):
+        (thu_muc / f"antispam-{d}.db").write_bytes(b"cu")
+    tep = db._sao_luu(thu_muc, giu=2)
+    assert tep.exists() and tep.name.startswith("antispam-")
+    con = sqlite3.connect(tep)
+    assert con.execute("SELECT trusted FROM members WHERE user_id=42").fetchone()[0] == 1
+    con.close()
+    con_lai = sorted(f.name for f in thu_muc.glob("antispam-*.db"))
+    assert len(con_lai) == 2 and con_lai[-1] == tep.name, con_lai
+
+
 def test_is_trusted_khong_ghi_gi():
     db = _db()
     assert not db._is_trusted(-1, 5)

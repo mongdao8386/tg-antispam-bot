@@ -35,6 +35,19 @@ TRUOT_TOI_DA = 3
 # không hưởng mãi.
 NHO_NGAY = 90
 
+# Cửa sổ đếm "đợt vào dồn dập", tính bằng giây. Đo trên 30 ngày dữ liệu thật:
+# đợt dày nhất là 26 người trong 2 phút - nhóm bình thường không bao giờ như thế.
+CUA_SO_DOT_VAO = 120
+
+
+def ghi_luot_vao(hang, luc: float, cua_so: float) -> int:
+    """Ghi một lượt vào nhóm, trả về số lượt trong cửa sổ vừa rồi."""
+    hang.append(luc)
+    while hang and hang[0] < luc - cua_so:
+        hang.popleft()
+    return len(hang)
+
+
 # Quyền lúc bị khoá: không gửi được gì cả.
 KHOA = ChatPermissions(can_send_messages=False)
 

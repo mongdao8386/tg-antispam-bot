@@ -8,6 +8,7 @@ Lệnh quản trị cũng tự xoá sau vài giây để nhóm luôn sạch.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import html
 import logging
 import os
@@ -800,6 +801,17 @@ async def _hot_ca_o(
     if not cap:
         return
 
+    # Bỏ những cặp (nhóm, người) đã ban rồi. Không có bước này thì MỖI lần
+    # chiến dịch nổ thêm một tin, bot lại ban lại toàn bộ ổ - đo được: 203 tài
+    # khoản thành 7.063 dòng log và chừng ấy lượt gọi Telegram vô ích trong
+    # 5 ngày. Người đã đăng bài vẫn giữ trong noi_dung_acc để chiến dịch không
+    # "quên" mất mình có bao nhiêu acc.
+    da_ban = await db.banned_pairs()
+    da_duoi_het = {u for _c, u in da_ban}
+    cap = [(u, c) for u, c in cap if (c, u) not in da_ban]
+    if not cap:
+        return
+
     bo_qua = set(cfg.owner_ids) | await _bot_admin_ids(context)
     ly_do = "đồng phạm trong chiến dịch rải hàng loạt"
     duoi_het = await control.get_flag(db, cfg, "ban_all_groups")
@@ -819,7 +831,9 @@ async def _hot_ca_o(
             await db.forget_member(gid, uid)
             _theo_doi.quen(gid, uid)
             xong += 1
-            if duoi_het:
+            # Đuổi khỏi mọi nhóm chỉ MỘT lần cho mỗi người, không phải mỗi nhóm.
+            if duoi_het and uid not in da_duoi_het:
+                da_duoi_het.add(uid)
                 await _ban_moi_nhom(context, uid, gid, str(uid))
 
     await asyncio.gather(*(duoi(u, c) for u, c in cap[:TRAN_HOT_MOT_LAN]))
@@ -997,7 +1011,10 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         and msg.from_user.id not in rules.seeding
         and await control.get_flag(db, cfg, "chong_rai")
     ):
-        ly_do_rai = _theo_doi.ghi(
+        # Tin ĐÃ SỬA vẫn được quét nội dung (Telegram gửi lại cả tin), nhưng
+        # không tính vào nhịp gửi: sửa lỗi chính tả 4 lần trong 2 phút mà bị
+        # ban vì "gửi lại cùng nội dung 4 lần" thì oan.
+        ly_do_rai = None if update.edited_message is not None else _theo_doi.ghi(
             chat.id,
             msg.from_user.id,
             " ".join(filter(None, [msg.text, msg.caption])),
@@ -1322,7 +1339,42 @@ async def on_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # Ghi mốc thời gian vào nhóm TRƯỚC khi xoá - cần để biết ai là thành viên mới.
     if msg.new_chat_members:
         db = _db(context)
-        bat_captcha = await control.get_flag(db, _cfg(context), "captcha")
+        cfg = _cfg(context)
+        bat_captcha = await control.get_flag(db, cfg, "captcha")
+
+        # Đợt vào dồn dập = bot army đang đổ bộ. Tự bật captcha cho nhóm này
+        # một lúc, dù công tắc chung đang tắt. Đây là cách giữ bot im lặng ngày
+        # thường mà vẫn có cửa chắn đúng lúc cần - Rose bắt admin tự bật tay.
+        tam = context.bot_data.setdefault("captcha_tam", {})
+        if cfg.captcha_auto_joins > 0:
+            hang = context.bot_data.setdefault("dot_vao", {}).setdefault(
+                msg.chat_id, deque(maxlen=200)
+            )
+            n = 0
+            for m in msg.new_chat_members:
+                if not m.is_bot:
+                    n = captcha.ghi_luot_vao(hang, time.time(), captcha.CUA_SO_DOT_VAO)
+            if n >= cfg.captcha_auto_joins and tam.get(msg.chat_id, 0) < time.time():
+                tam[msg.chat_id] = time.time() + cfg.captcha_auto_minutes * 60
+                log.warning(
+                    "%d người vào %s trong %d giây - tự bật captcha %d phút.",
+                    n, msg.chat.title or msg.chat_id, captcha.CUA_SO_DOT_VAO,
+                    cfg.captcha_auto_minutes,
+                )
+                if cfg.log_chat_id:
+                    try:
+                        await context.bot.send_message(
+                            cfg.log_chat_id,
+                            f"🔐 <b>{html.escape(msg.chat.title or str(msg.chat_id))}</b>: "
+                            f"{n} người vào trong {captcha.CUA_SO_DOT_VAO}s → tự bật captcha "
+                            f"{cfg.captcha_auto_minutes} phút.",
+                            parse_mode="HTML",
+                        )
+                    except TelegramError:
+                        pass
+        if not bat_captcha and tam.get(msg.chat_id, 0) > time.time():
+            bat_captcha = True
+
         for member in msg.new_chat_members:
             if not member.is_bot:
                 await db.mark_joined(msg.chat_id, member.id)
@@ -4126,6 +4178,9 @@ async def _post_init(app: Application) -> None:
     # bao giờ thành chiến dịch, giữ lại chỉ làm phình database.
     if app.job_queue:
         app.job_queue.run_repeating(_don_bo_nho, interval=86400, first=300)
+        # Sao lưu: whitelist, acc seeding, từ cấm, bộ nhớ chiến dịch đều nằm
+        # trong một file SQLite. Mất nó là dựng lại từ đầu.
+        app.job_queue.run_repeating(_sao_luu, interval=86400, first=600)
 
     # Câu cuối cùng, in SAU khi mọi thứ đã sẵn sàng. Trước đây câu này in
     # trước lúc kết nối nên không nói lên điều gì - bot có thể vẫn đang loay
@@ -4137,6 +4192,15 @@ async def _post_init(app: Application) -> None:
         + "\n",
         flush=True,
     )
+
+
+async def _sao_luu(context: ContextTypes.DEFAULT_TYPE) -> None:
+    cfg: Config = context.bot_data["cfg"]
+    try:
+        tep = await context.bot_data["db"].sao_luu(cfg.db_path.parent / "backup", giu=14)
+        log.info("Sao lưu database: %s", tep.name)
+    except Exception as exc:  # sao lưu hỏng không được làm sập bot
+        log.warning("Sao lưu database thất bại: %s", exc)
 
 
 async def _don_bo_nho(context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -303,6 +303,19 @@ Acc seeding, admin, người đã tin cậy không bao giờ bị hỏi. **Mặc
 im lặng mà captcha phải hiện một tin trong nhóm (tự xoá ngay khi xong) — bật trong ⚙️
 Công tắc khi bị tấn công. Chỉnh thời gian chờ bằng `CAPTCHA_SECONDS`.
 
+**Tự bật khi có đợt vào dồn dập.** Đo trên 30 ngày: đợt dày nhất là 26 người vào một
+nhóm trong 2 phút — nhóm bình thường không bao giờ như thế, đó là bot army đang đổ bộ.
+Từ 8 người / 2 phút (`CAPTCHA_AUTO_JOINS`), bot tự bật captcha cho **riêng nhóm đó**
+trong 30 phút rồi tự tắt, dù công tắc chung đang tắt. Rose bắt admin tự bật tay; ở đây
+cửa chắn tự lên đúng lúc mà ngày thường bot vẫn im lặng.
+
+## Sao lưu
+
+Whitelist, acc seeding, từ cấm, bộ nhớ chiến dịch, những gì bot đã học — tất cả nằm
+trong một file `antispam.db`. Mỗi ngày bot tự chép nó sang `backup/antispam-YYYYMMDD.db`
+(dùng `VACUUM INTO` nên không cần dừng bot), giữ 14 bản gần nhất. Mất máy thì chép file
+mới nhất về là chạy tiếp.
+
 ## Tự xoá tin nhắn dịch vụ## Tự xoá tin nhắn dịch vụ
 
 Những dòng chữ xám do Telegram tự sinh (*"X đã tham gia nhóm"*, *"X đã rời nhóm"*,
