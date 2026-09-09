@@ -5,6 +5,21 @@ Không có tin "đã ban X", không có cảnh báo, không có phản hồi —
 gần như không nhận ra bot tồn tại. Mọi thứ chỉ được ghi vào console và (tuỳ chọn) một
 kênh log riêng.
 
+Điều khiển hoàn toàn bằng **menu nút bấm** trong chat riêng với bot — không cần nhớ
+lệnh, dùng tốt trên điện thoại. Chống được cả **chiến dịch rải hàng trăm tài khoản**
+nhờ bộ nhớ vân tay chữ + ảnh xuyên mọi nhóm, có **captcha** chặn bot army ngay ở cửa,
+và **tự học** từ mỗi lần bạn gỡ ban.
+
+## Bắt đầu trong 5 phút
+
+1. Tạo bot ở [@BotFather](https://t.me/BotFather), lấy token. Chạy `/setprivacy` → chọn bot → **Disable**.
+2. Copy `.env.example` → `.env`, điền `BOT_TOKEN` và `OWNER_IDS` (ID của bạn — nhắn `/id` cho bot là có).
+3. Chạy bot (xem *Cài đặt* bên dưới). Thêm bot vào nhóm làm admin với quyền
+   *xoá tin, chặn người, hạn chế thành viên*. Bot tự nhận nhóm.
+4. Nhắn riêng cho bot, bấm **Start** → menu hiện ra. Vào 🚫 **Từ cấm** bấm chọn vài bộ
+   dựng sẵn; vào 👥 **Acc seeding** → 🔍 **Quét** để bot tự nhận nick của bạn.
+5. Nên để `ACTION=report` 1–2 ngày đầu để xem log rồi mới bật `ban`.
+
 ## Bot bắt được gì
 
 Mỗi luật ở đây **tự nó đủ để xử lý** — khớp là ban, không khớp thì thôi. Không có
@@ -268,6 +283,26 @@ tính thành một chiến dịch. Không đáng.
 Tắt bằng `CHONG_RAI=false` hoặc trong menu công tắc. Tốc độ: **0,06 ms** cho vân
 tay, **0,13 ms** cho cả lượt tra database.
 
+## Captcha khi vào nhóm
+
+Mọi luật khác đều xử lý **sau** khi tin đã hiện ra. Chiến dịch 334 tài khoản đo được là
+334 lần một tin rác lọt vào rồi mới bị xoá. Captcha chặn ở cửa: vào nhóm là bị khoá,
+bấm đúng nút mới được nói. Tài khoản ảo chạy script hầu như không bấm — Shieldy và
+Rose đều làm vậy vì đây là thứ hiệu quả nhất chống bot army.
+
+Khác bot khác ở ba chỗ:
+
+- **Qua captcha ở một nhóm thì 20 nhóm còn lại không hỏi lại** (nhớ 90 ngày). Bắt một
+  người bấm 20 lần là tự đuổi khách.
+- **Trượt thì chỉ bị mời ra** (ban rồi gỡ ngay) để vào lại thử tiếp. Trượt tới lần thứ
+  ba mới ban thật và đuổi khỏi mọi nhóm — lúc đó không còn là người vô ý.
+- **Trả lại đúng quyền mặc định của nhóm**, không phải "cho hết mọi quyền": nhóm đã
+  tắt poll cho thành viên thì người mới cũng không được poll.
+
+Acc seeding, admin, người đã tin cậy không bao giờ bị hỏi. **Mặc định tắt** vì bot chạy
+im lặng mà captcha phải hiện một tin trong nhóm (tự xoá ngay khi xong) — bật trong ⚙️
+Công tắc khi bị tấn công. Chỉnh thời gian chờ bằng `CAPTCHA_SECONDS`.
+
 ## Tự xoá tin nhắn dịch vụ## Tự xoá tin nhắn dịch vụ
 
 Những dòng chữ xám do Telegram tự sinh (*"X đã tham gia nhóm"*, *"X đã rời nhóm"*,
@@ -319,7 +354,8 @@ Copy `.env.example` thành `.env` rồi điền `BOT_TOKEN` lấy từ [@BotFath
 
 ## Thêm bot vào nhóm
 
-1. Thêm bot vào nhóm, **cấp quyền admin** với hai quyền: *Delete messages* và *Ban users*.
+1. Thêm bot vào nhóm, **cấp quyền admin** với ba quyền: *Delete messages*, *Ban users*,
+   và *Restrict members* (cần cho captcha).
 2. Trong @BotFather chạy `/setprivacy` → chọn bot → **Disable**. Không tắt privacy mode
    thì bot chỉ nhìn thấy lệnh, không đọc được tin nhắn thường và sẽ không lọc được gì.
 3. Gõ `/id` trong nhóm để lấy `chat_id` và `user_id` — điền vào `OWNER_IDS`, `LOG_CHAT_ID`.
@@ -342,20 +378,32 @@ Toàn bộ nằm trong `.env` (xem mô tả từng dòng trong `.env.example`). 
 Ai **không bao giờ** bị đụng tới: admin nhóm, `OWNER_IDS`, người được `/trust`,
 bot khác, admin ẩn danh, và bài đăng tự động từ kênh liên kết.
 
-## Lệnh quản trị
+## Điều khiển: menu nút bấm
 
-Chỉ admin dùng được. **Mọi phản hồi tự xoá sau 20 giây** cùng với lệnh gốc, để nhóm
-luôn sạch. Người không phải admin gõ lệnh thì lệnh bị xoá luôn, không có phản hồi.
+Nhắn riêng cho bot và bấm **Start** (hoặc gõ `/menu` ở bất cứ đâu). Mọi thứ đều đến
+được bằng nút, mỗi màn hình trả lời đúng ba câu: *đang có gì, làm được gì tiếp, quay
+lại đâu.*
 
-| Lệnh | Tác dụng |
+| Nút | Làm gì |
 |---|---|
-| `/status` | Xem cấu hình đang chạy + thống kê đã xử lý bao nhiêu |
-| `/check` (reply) | Chấm điểm thử một tin nhắn mà không xử lý — dùng để chỉnh ngưỡng. Với ảnh, hiện luôn nội dung QR giải được |
-| `/trust` (reply) | Đánh dấu người này tin cậy, bot bỏ qua hoàn toàn |
-| `/unban <id>` hoặc reply | Gỡ chặn và xoá lịch sử vi phạm |
-| `/whitelist add\|del\|list <domain>` | Whitelist domain riêng cho nhóm này |
-| `/id` | Xem `chat_id` / `user_id` — **mọi người đều dùng được**, không riêng admin |
-| `/start` | Chỉ trong chat riêng: giới thiệu bot + hiện ID của người dùng |
+| 👥 Acc seeding | Xem/thêm/bớt nick của bạn; 🔍 **Quét** tự tìm sau khi các acc bấm Start |
+| 🚫 Từ cấm | Bấm một bộ dựng sẵn là nạp/gỡ ngay; ➕ thêm cụm từ riêng |
+| 🔗 Link & @ | Domain, @username, số điện thoại được phép |
+| ⚙️ Công tắc | Bật/tắt từng luật, có hiệu lực ngay — kể cả **Captcha** |
+| 📡 Chiến dịch | Bot đang coi những gì là chiến dịch rải |
+| 🧠 Đã học | Bot học được gì từ những lần bạn gỡ ban |
+| 📋 / ↩️ | Ban gần đây / gỡ lượt vừa rồi |
+| ⏸ / 🧪 | Tạm ngưng / chuyển chế độ thử (chỉ ghi log, không ban) |
+
+Thêm bất kỳ thứ gì: bấm ➕, bot hỏi một câu, bạn trả lời là xong. Menu gọi **đúng hàm
+của lệnh gõ tay**, nên hai đường không bao giờ lệch nhau.
+
+**Lệnh gõ** vẫn dùng được cho người đã quen — gõ `/help` để xem đủ. Quy tắc phạm vi:
+*nhắn riêng bot = áp dụng mọi nhóm; gõ trong một nhóm = chỉ nhóm đó.* Trong nhóm, mọi
+phản hồi tự xoá sau 20 giây; người không phải admin gõ lệnh thì lệnh bị xoá luôn.
+
+Menu lệnh của Telegram được phân quyền để nhóm luôn im lặng: thành viên thường **không
+thấy lệnh nào**, admin nhóm thấy 12 lệnh hay dùng, owner/bot admin thấy 24 trong chat riêng.
 
 ## Kiểm thử
 
@@ -389,14 +437,21 @@ antispam_bot/
   vantay.py     vân tay chữ chịu được sửa đổi nhỏ (SimHash)
   anhhash.py    vân tay ảnh chịu được nén/thu nhỏ (pHash)
   tuhoc.py      học từ những lần admin gỡ ban
+  captcha.py    captcha khi vào nhóm (phần logic thuần)
+  menu.py       dựng menu nút bấm từ dữ liệu (không gọi Telegram)
   qrscan.py     giải mã QR trong ảnh (OpenCV, tuỳ chọn)
-  storage.py    SQLite: thành viên mới, lịch sử vi phạm, whitelist theo nhóm
-  bot.py        handler Telegram, thực thi hình phạt, lệnh quản trị
+  ocr.py        đọc chữ trong ảnh (Tesseract, tuỳ chọn)
+  control.py    công tắc bật/tắt lúc chạy, tạm ngưng, đổi chế độ
+  console.py    mật khẩu mở bot, phím tắt trên terminal
+  storage.py    SQLite: thành viên, vi phạm, whitelist, bộ nhớ nội dung, phản hồi
+  bot.py        handler Telegram, thực thi hình phạt, lệnh và menu
   __main__.py   khởi chạy
 tests/
-  test_vantay.py
-  test_tuhoc.py
-  test_detector.py
+  test_detector.py  luật + những tin thật từng bị ban oan
+  test_vantay.py    vân tay chữ + bộ nhớ chiến dịch
+  test_tuhoc.py     vân tay ảnh + tự học
+  test_captcha.py
+  test_menu.py
 ```
 
 ## Bot chạy nhưng không thấy làm gì?
