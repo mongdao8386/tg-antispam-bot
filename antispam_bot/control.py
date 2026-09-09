@@ -73,6 +73,7 @@ CONG_TAC = {
     "block_forwards": "Chặn tin chuyển tiếp",
     "block_links": "Chặn link lạ",
     "chong_rai": "Chống rải hàng loạt",
+    "captcha": "Captcha khi vào nhóm",
 }
 
 

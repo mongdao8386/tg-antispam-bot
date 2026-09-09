@@ -134,6 +134,13 @@ CREATE TABLE IF NOT EXISTS noi_dung_tha (
     PRIMARY KEY (van_tay, loai)
 );
 
+-- Người đã qua captcha ở bất kỳ nhóm nào. Qua một lần là mọi nhóm không hỏi
+-- lại (trong NHO_NGAY ngày) - xem captcha.py.
+CREATE TABLE IF NOT EXISTS captcha_da_qua (
+    user_id INTEGER PRIMARY KEY,
+    ts      INTEGER NOT NULL
+);
+
 -- Mỗi lần admin gỡ ban là một phiếu "luật này bắt sai". Xem tuhoc.py.
 CREATE TABLE IF NOT EXISTS phan_hoi (
     luat     TEXT PRIMARY KEY,
@@ -243,6 +250,17 @@ class Storage:
 
     async def mark_joined(self, chat_id: int, user_id: int) -> None:
         await self._run(self._mark_joined, chat_id, user_id)
+
+    def _is_trusted(self, chat_id: int, user_id: int) -> bool:
+        cur = self._conn.execute(
+            "SELECT trusted FROM members WHERE chat_id=? AND user_id=?", (chat_id, user_id)
+        )
+        row = cur.fetchone()
+        return bool(row and row[0])
+
+    async def is_trusted(self, chat_id: int, user_id: int) -> bool:
+        """Tra không ghi gì - khác touch_member vốn cộng thêm một tin nhắn."""
+        return await self._run(self._is_trusted, chat_id, user_id)
 
     def _set_trusted(self, chat_id: int, user_id: int, trusted: bool) -> None:
         self._conn.execute(
@@ -932,3 +950,25 @@ class Storage:
 
     async def xoa_phan_hoi(self, luat: str | None = None) -> int:
         return await self._run(self._xoa_phan_hoi, luat)
+
+    # -- captcha -----------------------------------------------------------
+
+    def _da_qua_captcha(self, user_id: int, trong_ngay: int) -> bool:
+        cur = self._conn.execute(
+            "SELECT ts FROM captcha_da_qua WHERE user_id=?", (user_id,)
+        )
+        row = cur.fetchone()
+        return row is not None and int(row[0]) >= int(time.time()) - trong_ngay * 86400
+
+    async def da_qua_captcha(self, user_id: int, trong_ngay: int = 90) -> bool:
+        return await self._run(self._da_qua_captcha, user_id, trong_ngay)
+
+    def _ghi_qua_captcha(self, user_id: int) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO captcha_da_qua (user_id, ts) VALUES (?,?)",
+            (user_id, int(time.time())),
+        )
+        self._conn.commit()
+
+    async def ghi_qua_captcha(self, user_id: int) -> None:
+        await self._run(self._ghi_qua_captcha, user_id)

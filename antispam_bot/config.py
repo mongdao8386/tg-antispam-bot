@@ -143,6 +143,11 @@ class Config:
     # dài thì không.
     raid_users_anh: int = 4
 
+    # --- Captcha khi vào nhóm (xem captcha.py). Mặc định TẮT vì phải hiện
+    # một tin trong nhóm; bật trong menu công tắc khi bị bot army tấn công. ---
+    captcha: bool = False
+    captcha_seconds: int = 120
+
     # --- Tự học từ những lần gỡ ban (xem tuhoc.py) ---
     tu_hoc: bool = True
     # Bấy nhiêu lần /undo cho CÙNG một luật thì bot tự tắt công tắc của luật đó.
@@ -235,6 +240,8 @@ class Config:
             repeat_window=float(_int("REPEAT_WINDOW", 120)),
             raid_users=_int("RAID_USERS", 3),
             raid_users_anh=_int("RAID_USERS_ANH", 4),
+            captcha=_bool("CAPTCHA", False),
+            captcha_seconds=max(30, _int("CAPTCHA_SECONDS", 120)),
             tu_hoc=_bool("TU_HOC", True),
             tu_hoc_nguong=_int("TU_HOC_NGUONG", 5),
             ban_all_groups=_bool("BAN_ALL_GROUPS", True),

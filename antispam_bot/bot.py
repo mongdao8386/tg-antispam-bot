@@ -24,6 +24,7 @@ from telegram import (
     BotCommandScopeDefault,
     Chat,
     ChatPermissions,
+    ChatPermissions,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -45,7 +46,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import anhhash, control, ngucanh, ocr, presets, qrscan, raivai, tuhoc, vantay
+from . import anhhash, captcha, control, ngucanh, ocr, presets, qrscan, raivai, tuhoc, vantay
 from .config import VALID_ACTIONS, Config
 from .detector import MessageFacts, Verdict, analyse
 from .normalize import (
@@ -1166,8 +1167,151 @@ def _service_kind(msg: Message) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Captcha khi vào nhóm (xem captcha.py)
+# ---------------------------------------------------------------------------
+
+_so_captcha = captcha.SoCaptcha()
+
+
+async def _quyen_mac_dinh(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> ChatPermissions:
+    """Quyền mặc định của nhóm, để trả lại đúng như cũ sau khi qua captcha.
+
+    Không dùng "cho hết mọi quyền": nhóm có thể đã tắt poll hay sticker cho
+    tất cả thành viên, trả kiểu đó là vô tình cấp thêm quyền cho người mới.
+    """
+    cache: dict[int, tuple[float, ChatPermissions]] = context.bot_data.setdefault("quyen_nhom", {})
+    hit = cache.get(chat_id)
+    if hit and time.time() - hit[0] < 600:
+        return hit[1]
+    chat = await context.bot.get_chat(chat_id)
+    quyen = chat.permissions or ChatPermissions.all_permissions()
+    cache[chat_id] = (time.time(), quyen)
+    return quyen
+
+
+async def _captcha_mien(chat_id: int, user, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Ai không bao giờ bị hỏi captcha."""
+    cfg, db = _cfg(context), _db(context)
+    if user.is_bot or user.id in cfg.owner_ids:
+        return True
+    if user.id in await _bot_admin_ids(context) or user.id in await _admin_ids(chat_id, context):
+        return True
+    if user.id in (await _chat_rules(chat_id, context)).seeding:
+        return True
+    if await db.is_trusted(chat_id, user.id):
+        return True
+    # Đã qua captcha ở nhóm khác: 20 nhóm hỏi 20 lần là tự đuổi khách.
+    return await db.da_qua_captcha(user.id, captcha.NHO_NGAY)
+
+
+async def _captcha_bat_dau(chat: Chat, user, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Khoá người mới và treo nút xác nhận. Không bấm kịp thì mời ra."""
+    cfg = _cfg(context)
+    if await _captcha_mien(chat.id, user, context):
+        return
+    try:
+        await context.bot.restrict_chat_member(chat.id, user.id, captcha.KHOA)
+    except TelegramError as exc:
+        # Thiếu quyền hạn chế thành viên thì captcha vô nghĩa. Báo một lần rồi thôi.
+        da_bao = context.bot_data.setdefault("captcha_loi", set())
+        if chat.id not in da_bao:
+            da_bao.add(chat.id)
+            log.warning("Captcha ở %s không khoá được người mới (%s) - bot cần quyền "
+                        "'Hạn chế thành viên'.", chat.title or chat.id, exc)
+        return
+
+    try:
+        sent = await chat.send_message(
+            captcha.noi_dung(user.full_name, cfg.captcha_seconds),
+            parse_mode="HTML",
+            reply_markup=captcha.ban_phim(user.id),
+            disable_notification=True,
+        )
+    except TelegramError as exc:
+        log.warning("Không gửi được captcha ở %s: %s", chat.id, exc)
+        return
+
+    _so_captcha.them(captcha.DangCho(
+        chat.id, user.id, sent.message_id,
+        time.time() + cfg.captcha_seconds, user.full_name or "",
+    ))
+    if context.job_queue:
+        context.job_queue.run_once(
+            _captcha_het_gio, cfg.captcha_seconds,
+            data=(chat.id, user.id), name=f"cap:{chat.id}:{user.id}",
+        )
+
+
+async def _captcha_xong(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE,
+                        qua: bool) -> None:
+    """Dọn dẹp sau captcha: xoá tin, huỷ job, mở khoá (nếu qua) hoặc mời ra."""
+    cho = _so_captcha.xoa(chat_id, user_id)
+    if cho is None:
+        return
+    if context.job_queue:
+        for job in context.job_queue.get_jobs_by_name(f"cap:{chat_id}:{user_id}"):
+            job.schedule_removal()
+    try:
+        await context.bot.delete_message(chat_id, cho.message_id)
+    except TelegramError:
+        pass
+
+    db = _db(context)
+    if qua:
+        try:
+            await context.bot.restrict_chat_member(
+                chat_id, user_id, await _quyen_mac_dinh(chat_id, context)
+            )
+        except TelegramError as exc:
+            log.warning("Không mở khoá được %s ở %s sau captcha: %s", user_id, chat_id, exc)
+        await db.ghi_qua_captcha(user_id)
+        _so_captcha.quen_truot(user_id)
+        return
+
+    # Trượt: mời ra nhưng gỡ ban ngay để vào lại thử tiếp. Trượt tới lần thứ
+    # TRUOT_TOI_DA thì không còn là người vô ý nữa - ban thật, đuổi khỏi mọi nhóm.
+    so_lan = _so_captcha.ghi_truot(user_id)
+    ban_that = so_lan >= captcha.TRUOT_TOI_DA
+    try:
+        await context.bot.ban_chat_member(chat_id, user_id)
+        if not ban_that:
+            await context.bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
+    except TelegramError as exc:
+        log.warning("Không mời ra được %s ở %s: %s", user_id, chat_id, exc)
+        return
+    if ban_that:
+        await db.log_offence(chat_id, user_id, 1, "ban",
+                             f"trượt captcha {so_lan} lần liên tiếp", "", cho.ten)
+        await db.forget_member(chat_id, user_id)
+        if await control.get_flag(db, _cfg(context), "ban_all_groups"):
+            asyncio.create_task(_ban_moi_nhom(context, user_id, chat_id, cho.ten or str(user_id)))
+        log.info("Captcha: ban %s (%s) sau %d lần trượt.", cho.ten, user_id, so_lan)
+
+
+async def _captcha_het_gio(context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id, user_id = context.job.data
+    await _captcha_xong(chat_id, user_id, context, qua=False)
+
+
+async def on_captcha_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if q is None or q.message is None:
+        return
+    try:
+        cho_ai = int((q.data or "")[4:])
+    except ValueError:
+        await q.answer()
+        return
+    if q.from_user.id != cho_ai:
+        await q.answer("Nút này dành cho người vừa vào nhóm.", show_alert=True)
+        return
+    await q.answer("Cảm ơn, chào mừng bạn!")
+    await _captcha_xong(q.message.chat_id, cho_ai, context, qua=True)
+
+
 async def on_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Ghi mốc gia nhập, rồi xoá tin dịch vụ theo cấu hình."""
+    """Ghi mốc gia nhập, chạy captcha, rồi xoá tin dịch vụ theo cấu hình."""
     msg = update.effective_message
     if msg is None or msg.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
@@ -1177,9 +1321,21 @@ async def on_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # Ghi mốc thời gian vào nhóm TRƯỚC khi xoá - cần để biết ai là thành viên mới.
     if msg.new_chat_members:
         db = _db(context)
+        bat_captcha = await control.get_flag(db, _cfg(context), "captcha")
         for member in msg.new_chat_members:
             if not member.is_bot:
                 await db.mark_joined(msg.chat_id, member.id)
+                if bat_captcha:
+                    await _captcha_bat_dau(msg.chat, member, context)
+
+    # Rời nhóm khi đang chờ captcha thì dọn luôn, khỏi treo nút vô chủ.
+    if msg.left_chat_member and _so_captcha.lay(msg.chat_id, msg.left_chat_member.id):
+        cho = _so_captcha.xoa(msg.chat_id, msg.left_chat_member.id)
+        if cho:
+            try:
+                await context.bot.delete_message(msg.chat_id, cho.message_id)
+            except TelegramError:
+                pass
 
     kinds = await _service_kinds_for(msg.chat_id, context)
     if not kinds:
@@ -3853,6 +4009,7 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler(["last_bans", "lastbans"], cmd_lastbans))
     app.add_handler(CommandHandler("undo", cmd_undo))
     app.add_handler(CallbackQueryHandler(on_panel_button, pattern=r"^p:"))
+    app.add_handler(CallbackQueryHandler(on_captcha_button, pattern=r"^cap:"))
     app.add_handler(CommandHandler("services", cmd_services))
     app.add_handler(CommandHandler("anon", cmd_anon))
     app.add_handler(CommandHandler(["add_phone", "addphone"], cmd_addphone))
