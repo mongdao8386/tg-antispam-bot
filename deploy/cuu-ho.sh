@@ -33,11 +33,13 @@ echo "=============================================="
 # --- 1. Tìm và mount phân vùng gốc ------------------------------------------
 TU_MOUNT=1
 GOC=""
-# Hostinger Emergency mode đã mount sẵn đĩa VPS vào /mnt - dùng luôn, đừng
-# mount lại (mount hai lần cùng một phân vùng là rước lỗi).
-if [ -d /mnt/etc/ssh ]; then
-    MNT=/mnt; GOC="(đã mount sẵn ở /mnt bởi hệ cứu hộ)"; TU_MOUNT=0
-fi
+# Hostinger Emergency mode đã mount sẵn đĩa VPS: thẳng /mnt hoặc theo nhãn
+# /mnt/sda1, /mnt/sda2... - dùng luôn cái có /etc/ssh, đừng mount lại.
+for D in /mnt /mnt/*; do
+    if [ -d "$D/etc/ssh" ]; then
+        MNT="$D"; GOC="(đã mount sẵn ở $D bởi hệ cứu hộ)"; TU_MOUNT=0; break
+    fi
+done
 vgchange -ay >/dev/null 2>&1 || true          # bật LVM nếu có
 mkdir -p "$MNT"
 # Thử từng phân vùng có hệ thống file Linux; cái nào có /etc/ssh là gốc.
