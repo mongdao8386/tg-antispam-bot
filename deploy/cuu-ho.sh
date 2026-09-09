@@ -105,6 +105,31 @@ for MNT in "${GOCS[@]}"; do
     rm -f "$MNT"/var/run/faillock/root "$MNT"/var/lib/faillock/root 2>/dev/null
     rm -f "$MNT"/var/log/tallylog 2>/dev/null
 
+    # -- Lối thứ hai, không phụ thuộc PermitRootLogin: user botadmin có sudo --
+    # Root bị cấm kiểu gì thì 'ssh botadmin@IP' rồi 'sudo -i' vẫn thành root.
+    if ! grep -q '^botadmin:' "$MNT/etc/passwd"; then
+        chroot "$MNT" useradd -m -s /bin/bash -u 1500 botadmin 2>/dev/null \
+            || chroot "$MNT" useradd -m -s /bin/bash botadmin 2>/dev/null
+    fi
+    if grep -q '^botadmin:' "$MNT/etc/passwd"; then
+        HOME_BA="$MNT/home/botadmin"
+        mkdir -p "$HOME_BA/.ssh"; touch "$HOME_BA/.ssh/authorized_keys"
+        grep -qF "$KHOA" "$HOME_BA/.ssh/authorized_keys" || echo "$KHOA" >> "$HOME_BA/.ssh/authorized_keys"
+        chmod 700 "$HOME_BA/.ssh"; chmod 600 "$HOME_BA/.ssh/authorized_keys"
+        UID_BA=$(grep '^botadmin:' "$MNT/etc/passwd" | cut -d: -f3)
+        GID_BA=$(grep '^botadmin:' "$MNT/etc/passwd" | cut -d: -f4)
+        chown -R "$UID_BA:$GID_BA" "$HOME_BA"
+        mkdir -p "$MNT/etc/sudoers.d"
+        echo 'botadmin ALL=(ALL) NOPASSWD:ALL' > "$MNT/etc/sudoers.d/botadmin"
+        chmod 440 "$MNT/etc/sudoers.d/botadmin"
+        # Mở khoá mật khẩu (useradd tạo tài khoản ở trạng thái khoá '!' - key
+        # login vẫn được, nhưng vài PAM từ chối tài khoản khoá).
+        sed -i 's/^botadmin:!:/botadmin:*:/' "$MNT/etc/shadow"
+        echo "   ✓ user botadmin (sudo không mật khẩu) + khoá"
+    else
+        echo "   ✗ không tạo được user botadmin trong chroot"
+    fi
+
     echo
     echo "   sshd SAU khi sửa (cấu hình hiệu lực, chạy sshd -T trong chroot):"
     chroot "$MNT" /usr/sbin/sshd -T 2>/dev/null \
