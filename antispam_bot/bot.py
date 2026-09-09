@@ -24,6 +24,7 @@ from telegram import (
     BotCommandScopeDefault,
     Chat,
     ChatPermissions,
+    ForceReply,
     ChatPermissions,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -46,7 +47,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import anhhash, captcha, control, ngucanh, ocr, presets, qrscan, raivai, tuhoc, vantay
+from . import anhhash, captcha, control, menu, ngucanh, ocr, presets, qrscan, raivai, tuhoc, vantay
 from .config import VALID_ACTIONS, Config
 from .detector import MessageFacts, Verdict, analyse
 from .normalize import (
@@ -2676,25 +2677,271 @@ def _congtac_keyboard(co: dict[str, bool]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(hang)
 
 
-async def cmd_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/panel — bảng điều khiển bấm nút, dùng ngay trên điện thoại."""
-    if not await _require_admin(update, context):
-        return
-    db = _db(context)
+# ---------------------------------------------------------------------------
+# Menu nút bấm (xem menu.py). Mọi thao tác đều đi từ /start.
+# ---------------------------------------------------------------------------
+
+# Bao lâu thì câu hỏi "gửi ID..." hết hạn. Người dùng bấm ➕ rồi bỏ đi, mấy
+# tiếng sau nhắn gì đó cho bot mà bị hiểu thành ID thì rất khó chịu.
+NHAP_HET_HAN = 300
+
+
+async def _tom_tat(context: ContextTypes.DEFAULT_TYPE) -> menu.TomTat:
+    db, cfg = _db(context), _cfg(context)
     dang_ngung, _ = await control.is_paused(db)
-    che_do = await control.effective_action(db, _cfg(context))
-    text = await _panel_text(context)
+    return menu.TomTat(
+        so_nhom=len(await _managed_groups(context)),
+        che_do=await control.effective_action(db, cfg),
+        dang_ngung=dang_ngung,
+        ban_24h=await db.count_recent_bans(86400),
+        so_tu_cam=await db.count_keywords(GLOBAL),
+        so_seeding=len(await db.get_fwd_whitelist(GLOBAL)),
+        so_chien_dich=len(await db.cac_chien_dich(cfg.raid_users, 999)),
+        captcha=await control.get_flag(db, cfg, "captcha"),
+    )
+
+
+async def _man_hinh(man: str, context: ContextTypes.DEFAULT_TYPE, la_owner: bool):
+    """Dựng (văn bản, bàn phím) cho một màn hình menu."""
+    db, cfg = _db(context), _cfg(context)
+
+    if man == "main":
+        return menu.man_chinh(await _tom_tat(context), la_owner)
+
+    if man == "seed":
+        ids = sorted(await db.get_fwd_whitelist(GLOBAL))
+        ten = {u: (t or tag) for u, t, tag, _ in await db.get_starters()}
+        return menu.man_seeding(ids, ten)
+
+    if man == "tucam":
+        co = set(await db.get_keywords(GLOBAL))
+        bo = {
+            khoa: (nhan, all(p in co for p in cum), len(cum))
+            for khoa, (nhan, cum) in presets.PRESETS.items()
+        }
+        return menu.man_tu_cam(len(co), bo)
+
+    if man == "link":
+        return menu.man_link(
+            sorted(await db.get_whitelist_own(GLOBAL)),
+            sorted(await db.get_usernames_own(GLOBAL)),
+            sorted(await db.get_phones_own(GLOBAL)),
+        )
+
+    if man == "ct":
+        return menu.man_cong_tac(await control.all_flags(db, cfg), control.CONG_TAC)
+
+    if man == "tt":
+        return menu.man_van_ban(await _panel_text(context), [[menu._nut("🔄 Làm mới", "tt")]])
+
+    if man == "cd":
+        cds = await db.cac_chien_dich(cfg.raid_users, 10)
+        if not cds:
+            chu = "📡 Chưa phát hiện chiến dịch rải nào."
+        else:
+            chu = "📡 <b>Chiến dịch rải đã nhận ra</b>\n" + "\n".join(
+                f"• <b>{n}</b> acc · {g} nhóm — "
+                + (f"<i>{html.escape(m[:50])}</i>" if lo == "t" else "🖼 một tấm ảnh")
+                for n, g, m, lo in cds
+            )
+        return menu.man_van_ban(chu)
+
+    if man == "hoc":
+        ph = await db.cac_phan_hoi(10)
+        if not ph:
+            chu = ("🧠 Chưa học được gì — bạn chưa gỡ lượt ban nào.\n"
+                   "Mỗi lần <b>↩️ Gỡ ban</b> là một phiếu “luật này bắt sai”.")
+        else:
+            dong = []
+            for luat, so_lan, _k, vi_du in ph:
+                ct = tuhoc.CONG_TAC_CUA_LUAT.get(luat)
+                con = max(0, cfg.tu_hoc_nguong - so_lan)
+                ghi = ("— bot không tự tắt được" if not ct
+                       else f"— còn {con} lần thì tự tắt <code>{ct}</code>" if con
+                       else f"— sẽ tắt <code>{ct}</code> ở lần gỡ tới")
+                dong.append(f"• <b>{html.escape(luat)}</b>: gỡ {so_lan} lần {ghi}")
+            chu = f"🧠 <b>Bot học từ {len(ph)} luật bạn từng gỡ</b>\n" + "\n".join(dong)
+        return menu.man_van_ban(chu, [[menu._nut("🗑 Xoá bộ đếm", "hocxoa")]])
+
+    if man == "hd":
+        return menu.man_van_ban(_huong_dan_ngan())
+
+    if man == "ban":
+        return menu.man_van_ban(await _bans_text(context))
+
+    return menu.man_van_ban("Màn hình không tồn tại.")
+
+
+def _huong_dan_ngan() -> str:
+    return (
+        "📖 <b>Hướng dẫn nhanh</b>\n\n"
+        "<b>1. Thêm bot vào nhóm</b> làm admin với quyền <i>xoá tin, chặn người, hạn chế thành viên</i>. "
+        "Bot tự nhận nhóm, không cần gõ gì.\n\n"
+        "<b>2. Acc seeding</b> — nick của bạn được miễn mọi luật. Bảo từng acc bấm Start với bot, "
+        "rồi vào 👥 → 🔍 Quét: acc nào có mặt ở nhiều nhóm là acc của bạn.\n\n"
+        "<b>3. Từ cấm</b> — vào 🚫, bấm chọn bộ dựng sẵn. Bot xét ngữ cảnh: hỏi “có lừa đảo không?” "
+        "hay kể chuyện phim thì không bị.\n\n"
+        "<b>4. Ban oan?</b> Bấm ↩️ Gỡ ban. Bot nhớ và tự tắt luật hay bắt sai.\n\n"
+        "<b>5. Bị bot army?</b> Vào ⚙️ bật <i>Captcha khi vào nhóm</i>. Người thật bấm một nút, "
+        "tài khoản ảo thì không.\n\n"
+        "<b>Trong nhóm</b>: reply tin rồi gõ <code>/check</code> để xem bot nghĩ gì về nó. "
+        "Gõ lệnh trong nhóm = chỉ áp dụng nhóm đó.\n\n"
+        "Gõ /help để xem đủ mọi lệnh."
+    )
+
+
+async def _mo_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, man: str = "main") -> None:
+    """Gửi một màn hình menu mới (từ /start, /menu, /panel)."""
+    cfg = _cfg(context)
+    la_owner = update.effective_user is not None and update.effective_user.id in cfg.owner_ids
+    chu, kb = await _man_hinh(man, context, la_owner)
     msg = update.effective_message
     try:
-        sent = await msg.reply_html(text, reply_markup=_panel_keyboard(dang_ngung, che_do))
+        sent = await msg.reply_html(chu, reply_markup=kb)
     except TelegramError as exc:
-        log.warning("Không mở được bảng điều khiển: %s", exc)
+        log.warning("Không mở được menu: %s", exc)
         return
-    # Trong nhóm thì tự dọn cho sạch; chat riêng thì giữ lại để bấm tiếp.
     if msg.chat.type != ChatType.PRIVATE and context.job_queue:
         context.job_queue.run_once(
             _delete_later, SELF_DESTRUCT * 3, data=(msg.chat_id, [msg.message_id, sent.message_id])
         )
+
+
+async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Xử lý mọi nút "m:...". Hành động xong thì vẽ lại màn hình phù hợp."""
+    q = update.callback_query
+    if q is None or q.message is None:
+        return
+    cfg, db = _cfg(context), _db(context)
+    user = q.from_user
+    la_owner = user.id in cfg.owner_ids
+    duoc = la_owner or await db.is_bot_admin(user.id)
+    if not duoc and q.message.chat.type != ChatType.PRIVATE:
+        duoc = user.id in await _admin_ids(q.message.chat_id, context)
+    if not duoc:
+        await q.answer("Bạn không có quyền dùng menu này.", show_alert=True)
+        return
+
+    data = (q.data or "")[2:]
+    man, _, tham = data.partition(":")
+    bao = ""
+
+    # --- Hành động: làm rồi chọn màn hình để vẽ lại ---
+    if man == "pause":
+        await control.pause(db, int(tham or 30)); bao = f"Đã ngưng {tham} phút"; man = "main"
+    elif man == "resume":
+        await control.resume(db); bao = "Đã bật lại"; man = "main"
+    elif man == "act":
+        await control.set_action(db, tham); man = "main"
+        bao = "Chuyển sang chế độ thử" if tham == "report" else "Đã bật ban lại"
+    elif man == "cong":
+        if tham in control.CONG_TAC:
+            moi = not await control.get_flag(db, cfg, tham)
+            await control.set_flag(db, tham, moi)
+            _invalidate_rules(context)
+            bao = f"{control.CONG_TAC[tham]}: {'BẬT' if moi else 'TẮT'}"
+        man = "ct"
+    elif man == "preset":
+        co = set(await db.get_keywords(GLOBAL))
+        nhan, cum = presets.PRESETS.get(tham, ("", []))
+        if cum:
+            if all(p in co for p in cum):
+                for p in cum:
+                    await db.remove_keyword(GLOBAL, p)
+                bao = f"Đã gỡ bộ {nhan}"
+            else:
+                for p in cum:
+                    await db.add_keyword(GLOBAL, p)
+                bao = f"Đã nạp bộ {nhan}"
+                if tham == "tocao":
+                    bao = "⚠️ Bộ này ban cả người CẢNH BÁO lừa đảo. Cân nhắc gỡ nếu bắt oan."
+            _invalidate_rules(context)
+        man = "tucam"
+    elif man == "undo":
+        kq = await _undo_last(context)
+        await q.answer("Đã gỡ" if "Đã gỡ" in kq else "Không gỡ được")
+        try:
+            await q.message.reply_html(kq)
+        except TelegramError:
+            pass
+        return
+    elif man == "hocxoa":
+        n = await db.xoa_phan_hoi(None); bao = f"Đã xoá {n} mục"; man = "hoc"
+    elif man == "scan":
+        await q.answer("Đang quét...")
+        context.args = []
+        await cmd_scan_accounts(update, context)
+        return
+    elif man == "ds":
+        await q.answer()
+        context.args = []
+        await {"word": cmd_bwords}.get(tham, cmd_bwords)(update, context)
+        return
+    elif man == "nhap":
+        if tham not in menu.NHAP:
+            await q.answer(); return
+        context.user_data["cho_nhap"] = (tham, time.time())
+        await q.answer()
+        try:
+            await q.message.reply_html(menu.cau_hoi_nhap(tham), reply_markup=ForceReply(selective=True))
+        except TelegramError:
+            pass
+        return
+
+    # --- Vẽ màn hình ---
+    chu, kb = await _man_hinh(man, context, la_owner)
+    await q.answer(bao or None)
+    try:
+        await q.edit_message_text(chu, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
+    except BadRequest as exc:
+        if "not modified" not in str(exc).lower():
+            log.debug("Không vẽ lại menu: %s", exc)
+    except TelegramError:
+        pass
+
+
+# Mỗi loại nhập liệu ứng với đúng lệnh gõ tay - dùng chung một hàm xử lý để
+# menu và lệnh không bao giờ lệch nhau.
+_LENH_NHAP = {
+    "user": "cmd_adduser", "deluser": "cmd_deluser",
+    "word": "cmd_addblacklist", "delword": "cmd_delblacklist",
+    "link": "cmd_addlink", "dellink": "cmd_dellink",
+    "at": "cmd_addat", "delat": "cmd_delat",
+    "phone": "cmd_addphone", "block": "cmd_blockuser",
+}
+
+
+async def on_nhap_private(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Người dùng vừa trả lời câu hỏi "gửi ID..." của menu."""
+    cho = context.user_data.get("cho_nhap")
+    if not cho:
+        return
+    loai, luc = cho
+    msg = update.effective_message
+    chu = (msg.text or "").strip()
+    if time.time() - luc > NHAP_HET_HAN:
+        context.user_data.pop("cho_nhap", None)
+        return
+    context.user_data.pop("cho_nhap", None)
+    if chu.lower() in ("huy", "huỷ", "hủy", "cancel", "/cancel"):
+        await _quiet_reply(update, context, "Đã bỏ.")
+        return
+    ham = globals().get(_LENH_NHAP.get(loai, ""))
+    if ham is None:
+        return
+    # Mọi lệnh đích đều tự tách dấu phẩy / khoảng trắng, nên chỉ cần đưa
+    # nguyên văn dưới dạng args như khi gõ tay.
+    context.args = chu.split()
+    await ham(update, context)
+    # Quay lại màn hình liên quan để thấy kết quả ngay.
+    await _mo_menu(update, context, menu.NHAP[loai].ve)
+
+
+async def cmd_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/panel, /menu — mở menu nút bấm."""
+    if not await _require_admin(update, context):
+        return
+    await _mo_menu(update, context)
 
 
 async def _bans_text(context: ContextTypes.DEFAULT_TYPE, limit: int = 10) -> str:
@@ -3464,49 +3711,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if user:
         await _db(context).add_starter(user.id, user.full_name or "", user.username or "")
 
-    # Owner / bot admin → hiện bảng điều khiển
+    # Owner / bot admin → mở menu nút bấm. Lệnh gõ vẫn dùng được, xem /help.
     db = _db(context)
     is_owner = user is not None and user.id in _cfg(context).owner_ids
     if is_owner or (user and await db.is_bot_admin(user.id)):
-        groups = await _managed_groups(context)
-        group_line = (
-            f"Đang quản lý <b>{len(groups)}</b> nhóm — /set_group để xem"
-            if groups
-            else "Chưa có nhóm nào — thêm bot vào nhóm, hoặc <code>/set_group -100XXX</code>"
-        )
-        owner_only = (
-            "\n<b>Chỉ owner</b>\n"
-            "/add_admin · /delete_admin — bot admin\n"
-            "/set_group — danh sách nhóm\n"
-            if is_owner else ""
-        )
-        await _quiet_reply(
-            update, context,
-            f"🛡 <b>Bot chống spam — Bảng điều khiển</b>\n"
-            f"ID của bạn: <code>{uid}</code>\n"
-            f"{group_line}\n\n"
-            "⚠️ <b>Nhắn ở đây = áp dụng cho MỌI nhóm.</b>\n"
-            "Muốn chỉ một nhóm thì gõ lệnh trong nhóm đó.\n\n"
-            "<b>Từ cấm</b> — ai gửi là ban ngay\n"
-            "/preset — nạp bộ dựng sẵn (nên bắt đầu từ đây)\n"
-            "<code>/add_word cụm từ, cụm từ</code>\n"
-            "/delete_word · /list_words\n\n"
-            "<b>Acc seeding</b> — được phép forward\n"
-            "/add_user &lt;id&gt; · /delete_user · /list_users\n\n"
-            "<b>Link được phép</b>\n"
-            "<code>/add_link t.me/kenhcuaban</code>\n"
-            "/delete_link · /list_links\n\n"
-            "<b>@ được phép nhắc</b> — @ khác là ban\n"
-            "<code>/add_username @kenhcuaban</code>\n"
-            "/delete_username · /list_usernames  (admin nhóm tự được phép)\n\n"
-            "<b>Chặn cứng người/kênh</b>\n"
-            "/block_user &lt;id&gt; · /unblock_user · /list_blocked\n\n"
-            "<b>Tin dịch vụ</b> — vào/rời/ghim nhóm\n"
-            "<code>/services join,leave,pin</code> · /services off\n\n"
-            "<b>Khác</b>\n"
-            "/status · /list_admins · /trust &lt;id&gt; · /unban &lt;id&gt;\n"
-            f"{owner_only}",
-        )
+        await _mo_menu(update, context)
         return
 
     # Người thường → chỉ hiện ID
@@ -4002,7 +4211,7 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler(["unblock_user", "unblockuser"], cmd_unblockuser))
     app.add_handler(CommandHandler(["list_blocked", "blocked"], cmd_blocked))
     # Bang dieu khien + bat/tat
-    app.add_handler(CommandHandler("panel", cmd_panel))
+    app.add_handler(CommandHandler(["panel", "menu"], cmd_panel))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("action", cmd_action))
@@ -4010,6 +4219,7 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler("undo", cmd_undo))
     app.add_handler(CallbackQueryHandler(on_panel_button, pattern=r"^p:"))
     app.add_handler(CallbackQueryHandler(on_captcha_button, pattern=r"^cap:"))
+    app.add_handler(CallbackQueryHandler(on_menu_button, pattern=r"^m:"))
     app.add_handler(CommandHandler("services", cmd_services))
     app.add_handler(CommandHandler("anon", cmd_anon))
     app.add_handler(CommandHandler(["add_phone", "addphone"], cmd_addphone))
@@ -4022,6 +4232,10 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("start", cmd_start))
     # Chuyen tiep tin cho bot trong chat rieng -> hien ID kem nut them.
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & filters.REPLY,
+        on_nhap_private,
+    ))
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.FORWARDED, on_forward_private
     ))
