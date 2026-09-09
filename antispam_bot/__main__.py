@@ -103,7 +103,7 @@ def _bao_loi_mang(cfg: Config) -> None:
         "\n"
         " Cách xử lý, theo thứ tự nên thử:\n"
         "\n"
-        " 1. CHẠY TRÊN DROPLET (khuyến nghị). Máy chủ ở Singapore không dính\n"
+        " 1. CHẠY TRÊN VPS (khuyến nghị). Máy chủ ở nước ngoài không dính\n"
         "    chặn này. Bạn đã cài sẵn, chỉ cần đẩy code lên GitHub là xong.\n"
         "\n"
         " 2. Dùng proxy: thêm vào .env rồi chạy lại\n"

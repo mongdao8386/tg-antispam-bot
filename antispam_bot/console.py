@@ -61,7 +61,7 @@ def hoi_mat_khau(chuoi_luu: str, so_lan: int = 3) -> bool:
     """Hỏi mật khẩu ở terminal. True nếu đúng hoặc không cần hỏi."""
     if not chuoi_luu:
         return True
-    # Chạy dưới systemd trên droplet thì không có bàn phím -> bỏ qua, nếu
+    # Chạy dưới systemd trên VPS thì không có bàn phím -> bỏ qua, nếu
     # không dịch vụ sẽ treo mãi ở chỗ chờ nhập.
     if not sys.stdin or not sys.stdin.isatty():
         return True
@@ -166,7 +166,7 @@ class PhimTat:
     Ctrl+C trùng phím copy nên rất dễ bấm nhầm rồi tắt bot oan. Dùng một phím
     hiếm dùng (mặc định Shift+F) thì không bao giờ nhầm.
 
-    Chỉ chạy khi có bàn phím thật. Trên droplet không có TTY nên bỏ qua, và
+    Chỉ chạy khi có bàn phím thật. Trên VPS không có TTY nên bỏ qua, và
     systemd vẫn dừng dịch vụ bằng tín hiệu bình thường.
     """
 

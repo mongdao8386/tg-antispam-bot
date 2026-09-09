@@ -32,7 +32,7 @@ log = logging.getLogger("antispam.ocr")
 # pytesseract chạy tesseract bằng subprocess nên KHÔNG vướng GIL - chạy song
 # song thật. Nhưng nó ngốn CPU, nên mở quá số nhân chỉ tổ tranh nhau và ngốn
 # RAM: một đợt rải spam có thể đẻ ra hàng chục tiến trình tesseract cùng lúc
-# và làm chết droplet 1GB. Đo được: 4 ảnh song song trên máy 4 nhân nhanh gấp
+# và làm chết VPS 1GB. Đo được: 4 ảnh song song trên máy 4 nhân nhanh gấp
 # 3.2 lần chạy lần lượt; quá 4 thì tổng thời gian tăng tuyến tính.
 _MAX_PARALLEL = max(2, os.cpu_count() or 2)
 _sem: asyncio.Semaphore | None = None

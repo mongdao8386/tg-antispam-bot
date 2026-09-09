@@ -1,5 +1,5 @@
 #!/bin/bash
-# Kéo code mới từ GitHub rồi khởi động lại bot. Chạy trên DROPLET.
+# Kéo code mới từ GitHub rồi khởi động lại bot. Chạy trên VPS.
 #
 # Điểm quan trọng: nếu code mới lỗi, script TỰ LÙI về bản cũ và chạy lại.
 # Không có bước này thì một commit hỏng sẽ làm bot chết im cho tới khi
@@ -34,7 +34,7 @@ fi
 echo "Có bản mới: ${CU:0:7} -> ${MOI:0:7}"
 git_as log --oneline "${CU}..${MOI}" | sed 's/^/    /'
 
-# reset --hard cho sạch, tránh xung đột nếu file trên droplet bị sửa tay.
+# reset --hard cho sạch, tránh xung đột nếu file trên VPS bị sửa tay.
 # Không đụng tới file chưa theo dõi (.env, antispam.db) - chúng nằm trong
 # .gitignore nên vẫn nguyên.
 git_as reset --hard --quiet origin/main || { echo "reset thất bại"; exit 1; }

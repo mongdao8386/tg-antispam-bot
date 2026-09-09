@@ -1,11 +1,11 @@
 #!/bin/bash
 # =============================================================================
-# Dán TOÀN BỘ file này vào ô "Startup scripts" khi tạo droplet DigitalOcean.
+# Dán TOÀN BỘ file này vào ô "Startup scripts" (DigitalOcean) hay "Post-install script" (Hostinger) khi tạo VPS DigitalOcean.
 # Khuyến nghị chọn: Ubuntu 24.04 LTS, gói 1GB RAM trở lên.
 #
 # ⚠️ TUYỆT ĐỐI KHÔNG ghi BOT_TOKEN vào đây.
-#    Nội dung ô này hiện nguyên văn trong bảng điều khiển DigitalOcean và bất kỳ
-#    tiến trình nào trên droplet cũng đọc được qua metadata (169.254.169.254).
+#    Nội dung ô này hiện nguyên văn trong bảng điều khiển nhà cung cấp (DigitalOcean, Hostinger...) và bất kỳ
+#    tiến trình nào trên VPS cũng đọc được qua metadata (169.254.169.254).
 #    Token sẽ được tạo tay ở bước sau, trong file .env với quyền 600.
 #
 # Script này chỉ dựng sẵn môi trường. Code và .env upload sau.
@@ -23,7 +23,7 @@ apt-get install -y libglib2.0-0t64 || apt-get install -y libglib2.0-0
 # OCR: bộ nhận dạng + dữ liệu tiếng Việt (thiếu gói -vie thì đọc sai dấu bét nhè).
 apt-get install -y tesseract-ocr tesseract-ocr-vie
 
-# Swap 1GB: gói droplet nhỏ dễ hết RAM lúc pip biên dịch numpy/opencv.
+# Swap 1GB: gói VPS nhỏ dễ hết RAM lúc pip biên dịch numpy/opencv.
 if [ ! -f /swapfile ]; then
     fallocate -l 1G /swapfile
     chmod 600 /swapfile

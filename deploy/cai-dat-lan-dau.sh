@@ -1,21 +1,21 @@
 #!/bin/bash
 # =============================================================================
-#  CÀI ĐẶT LẦN ĐẦU — chạy MỘT LẦN trên droplet mới.
+#  CÀI ĐẶT LẦN ĐẦU — chạy MỘT LẦN trên VPS mới.
 #
 #  Hai cách dùng, chọn một:
 #
-#  A. Lúc tạo droplet: dán TOÀN BỘ file này vào ô "Startup scripts".
+#  A. Lúc tạo VPS: dán TOÀN BỘ file này vào ô "Startup scripts" (DigitalOcean) hay "Post-install script" (Hostinger).
 #     Chọn Ubuntu 24.04 LTS, gói 1GB RAM trở lên.
 #
-#  B. Droplet đã có sẵn: SSH vào rồi chạy
+#  B. VPS đã có sẵn: SSH vào rồi chạy
 #        curl -fsSL https://raw.githubusercontent.com/mongdao8386/tg-antispam-bot/main/deploy/cai-dat-lan-dau.sh | bash
 #
 #  Script làm trọn gói: cài thư viện, tải code từ GitHub, dựng dịch vụ, bật tự
 #  cập nhật. Xong chỉ còn một việc duy nhất là tạo file .env chứa token.
 #
-#  ⚠️ KHÔNG ghi BOT_TOKEN vào file này. Nội dung ô "Startup scripts" hiện
-#     nguyên văn trong bảng điều khiển DigitalOcean và đọc được từ metadata
-#     của droplet. Token sẽ tạo tay ở bước cuối, với quyền 600.
+#  ⚠️ KHÔNG ghi BOT_TOKEN vào file này. Nội dung ô "Startup scripts" (DigitalOcean) hay "Post-install script" (Hostinger) hiện
+#     nguyên văn trong bảng điều khiển nhà cung cấp (DigitalOcean, Hostinger...) và đọc được từ metadata
+#     của VPS. Token sẽ tạo tay ở bước cuối, với quyền 600.
 # =============================================================================
 set -eu
 
@@ -41,7 +41,7 @@ apt-get install -y -qq libglib2.0-0t64 || apt-get install -y -qq libglib2.0-0
 apt-get install -y -qq tesseract-ocr tesseract-ocr-vie
 
 # --- 2. Swap ---------------------------------------------------------------
-# Gói droplet 1GB dễ hết RAM khi pip cài numpy/opencv và khi Tesseract chạy.
+# Gói VPS 1GB dễ hết RAM khi pip cài numpy/opencv và khi Tesseract chạy.
 if [ ! -f /swapfile ]; then
     echo "[2/7] Tạo swap 1GB..."
     fallocate -l 1G /swapfile
@@ -54,10 +54,17 @@ else
 fi
 
 # --- 3. Tường lửa ----------------------------------------------------------
-# Bot chỉ gọi ra ngoài, không cần mở cổng vào.
-echo "[3/7] Bật tường lửa (chỉ mở SSH)..."
-ufw allow OpenSSH >/dev/null
-ufw --force enable >/dev/null
+# Bot chỉ gọi ra ngoài, không cần mở cổng vào. Nhưng KHÔNG tự bật ufw:
+# máy này có thể đang chạy thứ khác (website ở cổng 80/443). Bật ufw mà chỉ
+# mở SSH là chặn luôn website đó - đã suýt xảy ra với VPS Hostinger dùng
+# chung. Nhà cung cấp (Hostinger, DigitalOcean) đều có tường lửa riêng ở
+# ngoài; ai vẫn muốn ufw thì tự bật sau, có chủ đích.
+if ufw status 2>/dev/null | grep -q "^Status: active"; then
+    echo "[3/7] ufw đang bật sẵn - chỉ đảm bảo SSH không bị khoá."
+    ufw allow OpenSSH >/dev/null
+else
+    echo "[3/7] Không bật ufw (dùng tường lửa của nhà cung cấp)."
+fi
 systemctl enable --now unattended-upgrades >/dev/null 2>&1 || true
 
 # --- 4. Tài khoản riêng ----------------------------------------------------
@@ -166,7 +173,7 @@ cat >/root/BUOC-TIEP-THEO.txt <<'HD'
 
 Trên máy Windows của bạn, tại thư mục TG-bots, chạy:
 
-    scp .env root@<IP-DROPLET>:/opt/antispam/app/.env
+    scp .env root@<IP-VPS>:/opt/antispam/app/.env
 
 Rồi quay lại đây chạy:
 
@@ -178,7 +185,7 @@ Rồi quay lại đây chạy:
 Muốn giữ dữ liệu cũ (từ cấm, acc seeding, nhóm đang quản lý) thì chép
 thêm database — NHỚ TẮT BOT Ở MÁY WINDOWS TRƯỚC để file không ghi dở:
 
-    scp antispam.db root@<IP-DROPLET>:/opt/antispam/app/
+    scp antispam.db root@<IP-VPS>:/opt/antispam/app/
 
 --------------------------------------------------------------
  LỆNH HAY DÙNG
@@ -189,7 +196,7 @@ thêm database — NHỚ TẮT BOT Ở MÁY WINDOWS TRƯỚC để file không g
   Cập nhật ngay      : systemctl start antispam-update
   Xem lịch cập nhật  : systemctl list-timers antispam-update
 
-Từ giờ chỉ cần git push trên máy, droplet tự lấy code mới trong 2 phút.
+Từ giờ chỉ cần git push trên máy, VPS tự lấy code mới trong 2 phút.
 ==============================================================
 HD
 
@@ -213,7 +220,7 @@ else
     echo " Từ máy Windows, trong thư mục TG-bots:"
     echo "     scp .env root@\$(hostname -I | awk '{print \$1}'):/opt/antispam/app/.env"
     echo
-    echo " Rồi chạy trên droplet:"
+    echo " Rồi chạy trên VPS:"
     echo "     chmod 600 /opt/antispam/app/.env"
     echo "     chown -R antispam:antispam /opt/antispam/app"
     echo "     systemctl enable --now antispam"

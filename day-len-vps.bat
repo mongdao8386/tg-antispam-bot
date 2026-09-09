@@ -1,19 +1,19 @@
 @echo off
 REM ===========================================================
-REM  Day code len droplet roi khoi dong lai bot.
-REM  Chay tren MAY WINDOWS (khong phai tren droplet).
+REM  Day code len VPS roi khoi dong lai bot.
+REM  Chay tren MAY WINDOWS (khong phai tren VPS).
 REM
-REM  Lan dau dung: sua dong SET IP= ben duoi thanh IP droplet cua ban.
+REM  Lan dau dung: sua dong SET IP= ben duoi thanh IP VPS cua ban.
 REM ===========================================================
 
 chcp 65001 >nul
 cd /d "%~dp0"
 
-REM >>> SUA DONG NAY: dien IP droplet <<<
-set "IP="
+REM >>> SUA DONG NAY: dien IP VPS <<<
+set "IP=187.53.132.36"
 
 if "%IP%"=="" (
-    set /p IP="Nhap IP droplet (vd 165.22.10.20): "
+    set /p IP="Nhap IP VPS (vd 187.53.132.36): "
 )
 if "%IP%"=="" (
     echo  [LOI] Chua co IP.
@@ -26,10 +26,10 @@ echo  Dang day code len %IP% ...
 echo  ---------------------------------------------------------
 
 REM Chi day ma nguon. KHONG day:
-REM   tessdata\  - tren droplet da co goi vie cai bang apt
+REM   tessdata\  - tren VPS da co goi vie cai bang apt
 REM   .venv\     - moi truong ao cua Windows, khong dung duoc tren Linux
-REM   .env       - chua token, tao tay tren droplet mot lan
-REM   antispam.db- du lieu song tren droplet, day len se de len mat het
+REM   .env       - chua token, tao tay tren VPS mot lan
+REM   antispam.db- du lieu song tren VPS, day len se de len mat het
 scp -r antispam_bot requirements.txt root@%IP%:/opt/antispam/app/
 if errorlevel 1 (
     echo.

@@ -331,7 +331,7 @@ cli.bat starters
 cli.bat seeding add 123456789 987654321
 ```
 
-Trên Linux/droplet: `python -m antispam_bot.cli ...` với cùng tham số.
+Trên Linux/VPS: `python -m antispam_bot.cli ...` với cùng tham số.
 
 CLI ghi thẳng vào `antispam.db` — đúng file bot đang dùng (SQLite WAL cho phép ghi song
 song). Ghi xong nó **đánh dấu đổi** (`cfg:version`), bot đang chạy thấy số đó khác là bỏ

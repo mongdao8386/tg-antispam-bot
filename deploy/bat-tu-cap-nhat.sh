@@ -1,9 +1,9 @@
 #!/bin/bash
-# Bật chế độ tự cập nhật từ GitHub. Chạy MỘT LẦN trên droplet:
+# Bật chế độ tự cập nhật từ GitHub. Chạy MỘT LẦN trên VPS:
 #
 #   bash /opt/antispam/app/deploy/bat-tu-cap-nhat.sh
 #
-# Sau đó chỉ cần git push trên máy, droplet tự lấy code mới trong vòng 2 phút.
+# Sau đó chỉ cần git push trên máy, VPS tự lấy code mới trong vòng 2 phút.
 set -eux
 
 REPO=${REPO:-https://github.com/mongdao8386/tg-antispam-bot.git}
