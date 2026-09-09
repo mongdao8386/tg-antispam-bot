@@ -179,11 +179,6 @@ class Config:
     # Số tin xử lý song song. 1 = từng tin một như mặc định thư viện.
     concurrent_updates: int = 16
 
-    web_enabled: bool = False
-    web_host: str = "127.0.0.1"
-    web_port: int = 8080
-    web_url: str = ""
-    web_session_hours: int = 12
 
     # Khoá bàn phím khi chạy trên máy cá nhân (bỏ trống = không hỏi).
     start_password: str = ""
@@ -264,11 +259,6 @@ class Config:
             proxy_url=(os.getenv("PROXY_URL") or "").strip(),
             force_ipv4=_bool("FORCE_IPV4", True),
             concurrent_updates=max(1, _int("CONCURRENT_UPDATES", 16)),
-            web_enabled=_bool("WEB_ENABLED", False),
-            web_host=(os.getenv("WEB_HOST") or "127.0.0.1").strip(),
-            web_port=_int("WEB_PORT", 8080),
-            web_url=(os.getenv("WEB_URL") or "").strip().rstrip("/"),
-            web_session_hours=_int("WEB_SESSION_HOURS", 12),
             start_password=(os.getenv("START_PASSWORD") or "").strip(),
             stop_key=((os.getenv("STOP_KEY") or "F").strip() or "F")[:1].upper(),
             db_path=Path((os.getenv("DB_PATH") or "antispam.db").strip()),

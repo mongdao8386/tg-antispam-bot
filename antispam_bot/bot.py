@@ -45,7 +45,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import anhhash, control, ngucanh, ocr, presets, qrscan, raivai, tuhoc, vantay, web
+from . import anhhash, control, ngucanh, ocr, presets, qrscan, raivai, tuhoc, vantay
 from .config import VALID_ACTIONS, Config
 from .detector import MessageFacts, Verdict, analyse
 from .normalize import (
@@ -2914,65 +2914,6 @@ async def cmd_phones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _quiet_reply(update, context, khoi)
 
 
-async def cmd_web(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/web — cấp liên kết đăng nhập bảng điều khiển web (dùng một lần)."""
-    # Chỉ owner: bảng web sửa được mọi thứ nên không mở cho admin nhóm.
-    if not _require_owner(update, context):
-        try:
-            await update.effective_message.delete()
-        except TelegramError:
-            pass
-        return
-    msg = update.effective_message
-    if msg.chat.type != ChatType.PRIVATE:
-        await _quiet_reply(update, context, "Nhắn riêng cho bot rồi gõ /web — link này không nên để lộ trong nhóm.")
-        return
-
-    cfg = _cfg(context)
-    if not cfg.web_enabled:
-        await _quiet_reply(
-            update, context,
-            "Bảng web đang tắt. Bật bằng cách đặt <code>WEB_ENABLED=true</code> "
-            "trong .env rồi khởi động lại bot.",
-        )
-        return
-    if not web.AVAILABLE:
-        await _quiet_reply(
-            update, context,
-            f"Thiếu thư viện web: <code>{html.escape(web.UNAVAILABLE_REASON)}</code>\n"
-            "Cài: <code>pip install fastapi uvicorn</code>",
-        )
-        return
-
-    # Ưu tiên địa chỉ do Cloudflare Tunnel ghi vào DB. Tunnel kiểu nhanh đổi
-    # địa chỉ mỗi lần khởi động lại, nên nó tự cập nhật vào đây thay vì bắt
-    # sửa .env rồi khởi động lại bot.
-    goc = (await _db(context).get_setting("web_url") or "").strip()
-    goc = goc or cfg.web_url or f"http://{cfg.web_host}:{cfg.web_port}"
-    lien_ket = f"{goc}/vao/{web.new_ticket()}"
-    canh_bao = ""
-    if goc.startswith("https://"):
-        pass  # đã có HTTPS (thường là qua Cloudflare Tunnel) - không cần cảnh báo
-    elif goc.startswith("http://127.") or goc.startswith("http://localhost"):
-        canh_bao = (
-            "\n\n⚠️ Bảng chỉ nghe ở <code>127.0.0.1</code> nên điện thoại chưa vào được.\n"
-            "Mở an toàn bằng Cloudflare Tunnel:\n"
-            "<code>bash /opt/antispam/app/deploy/cloudflare-tunnel.sh</code>"
-        )
-    else:
-        canh_bao = (
-            "\n\n⚠️ Đang dùng <b>http</b> (không mã hoá). Nên đặt sau HTTPS "
-            "trước khi dùng qua Internet."
-        )
-    await _quiet_reply(
-        update, context,
-        f"🔗 <a href=\"{html.escape(lien_ket)}\">Mở bảng điều khiển</a>\n\n"
-        f"<code>{html.escape(lien_ket)}</code>\n\n"
-        f"Liên kết dùng <b>một lần</b>, hết hạn sau 5 phút. "
-        f"Đăng nhập rồi thì giữ được {cfg.web_session_hours} giờ.{canh_bao}",
-    )
-
-
 # ---------------------------------------------------------------------------
 # Quét lại và đuổi người đã bị ban khỏi mọi nhóm — /purge_all
 # ---------------------------------------------------------------------------
@@ -3505,7 +3446,6 @@ _OWNER_CMDS = [
     BotCommand("set_group", "🗂 Quản lý danh sách nhóm"),
     BotCommand("services", "🧽 Tự xoá tin vào/rời/ghim"),
     BotCommand("anon", "🕶 Kiểm tra bot đã ẩn danh chưa"),
-    BotCommand("web", "🌐 Mở bảng điều khiển web"),
     BotCommand("id", "🆔 Xem ID Telegram của bạn"),
 ]
 
@@ -3536,7 +3476,7 @@ _GROUP_ADMIN_CMDS = [
 
 
 # Lệnh chỉ owner mới dùng được — ẩn khỏi menu của bot admin thường.
-_OWNER_ONLY = {"add_admin", "delete_admin", "set_group", "web",
+_OWNER_ONLY = {"add_admin", "delete_admin", "set_group",
                "purge_all", "stop_purge"}
 
 
@@ -3788,8 +3728,6 @@ async def _post_init(app: Application) -> None:
     if app.job_queue:
         app.job_queue.run_repeating(_don_bo_nho, interval=86400, first=300)
 
-    await _start_web(app)
-
     # Câu cuối cùng, in SAU khi mọi thứ đã sẵn sàng. Trước đây câu này in
     # trước lúc kết nối nên không nói lên điều gì - bot có thể vẫn đang loay
     # hoay gọi Telegram mà người dùng tưởng đã chạy.
@@ -3806,37 +3744,6 @@ async def _don_bo_nho(context: ContextTypes.DEFAULT_TYPE) -> None:
     xoa = await context.bot_data["db"].don_noi_dung(GIU_NOI_DUNG_NGAY)
     if xoa:
         log.info("Dọn bộ nhớ nội dung: bỏ %d bài không thành chiến dịch.", xoa)
-
-
-async def _start_web(app: Application) -> None:
-    """Chạy bảng web trong cùng event loop với bot."""
-    cfg: Config = app.bot_data["cfg"]
-    if not cfg.web_enabled:
-        return
-    if not web.AVAILABLE:
-        log.warning(
-            "Bảng web: BẬT trong .env nhưng thiếu thư viện (%s). "
-            "Cài: pip install fastapi uvicorn",
-            web.UNAVAILABLE_REASON,
-        )
-        return
-    import uvicorn
-
-    server = uvicorn.Server(uvicorn.Config(
-        web.build_app(app, cfg.web_session_hours),
-        host=cfg.web_host, port=cfg.web_port,
-        log_level="warning", access_log=False,
-    ))
-    app.bot_data["web_server"] = server
-    app.bot_data["web_task"] = asyncio.create_task(server.serve())
-    log.info("Bảng web chạy ở http://%s:%d — gõ /web trong chat riêng để lấy link vào.",
-             cfg.web_host, cfg.web_port)
-    if cfg.web_host not in ("127.0.0.1", "localhost") and not cfg.web_url.startswith("https://"):
-        log.warning(
-            "Bảng web đang mở ra ngoài (%s) mà KHÔNG có HTTPS. Bất kỳ ai đoán "
-            "trúng liên kết đều vào được. Nên đặt sau Cloudflare Tunnel.",
-            cfg.web_host,
-        )
 
 
 async def _post_shutdown(app: Application) -> None:
@@ -3951,7 +3858,6 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler(["add_phone", "addphone"], cmd_addphone))
     app.add_handler(CommandHandler(["delete_phone", "delphone"], cmd_delphone))
     app.add_handler(CommandHandler(["list_phones", "phones"], cmd_phones))
-    app.add_handler(CommandHandler("web", cmd_web))
     app.add_handler(CommandHandler(["purge_all", "quetlai"], cmd_quetlai))
     app.add_handler(CommandHandler(["stop_purge", "dungquet"], cmd_dungquet))
     app.add_handler(CommandHandler("scan_accounts", cmd_scan_accounts))

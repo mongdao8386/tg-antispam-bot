@@ -54,7 +54,7 @@ else
 fi
 
 # --- 3. Tường lửa ----------------------------------------------------------
-# Bot chỉ gọi ra ngoài, không cần mở cổng vào. Bảng web nghe ở 127.0.0.1.
+# Bot chỉ gọi ra ngoài, không cần mở cổng vào.
 echo "[3/7] Bật tường lửa (chỉ mở SSH)..."
 ufw allow OpenSSH >/dev/null
 ufw --force enable >/dev/null
