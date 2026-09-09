@@ -53,9 +53,17 @@ while read -r DEV FS; do
     fi
 done < <(lsblk -rno PATH,FSTYPE 2>/dev/null)
 
+LIVE=0
 if [ ${#GOCS[@]} -eq 0 ]; then
-    echo " ✗ Không thấy phân vùng nào có /etc/ssh. Gửi ảnh 'lsblk -f' ở trên cho người hỗ trợ."
-    exit 1
+    # Không có đĩa nào dưới /mnt, mà chính máy này có /etc/ssh: ta đang đứng
+    # TRÊN hệ thật (vào bằng console), không phải hệ cứu hộ. Sửa thẳng "/".
+    if [ -d /etc/ssh ] && [ -x /usr/sbin/sshd ]; then
+        GOCS=("/"); LIVE=1
+        echo " ► Đang ở trên hệ thống THẬT (không phải cứu hộ) - sửa thẳng / rồi khởi động lại sshd."
+    else
+        echo " ✗ Không thấy phân vùng nào có /etc/ssh. Gửi ảnh 'lsblk -f' ở trên cho người hỗ trợ."
+        exit 1
+    fi
 fi
 
 KHOA="$(curl -fsSL --max-time 10 "$KHOA_URL" 2>/dev/null || true)"
@@ -144,7 +152,27 @@ done
 sync
 for M in /mnt/cuu-ho-*; do [ -d "$M" ] && umount "$M" 2>/dev/null; done
 echo
-echo "=============================================="
-echo " XONG. Vào hPanel TẮT emergency mode để máy khởi động lại."
-echo " Nếu ở trên có NHIỀU phân vùng, gửi toàn bộ màn hình này cho người hỗ trợ."
-echo "=============================================="
+if [ "$LIVE" = 1 ]; then
+    # Trên hệ thật: kiểm cú pháp rồi nạp lại sshd ngay, không cần khởi động lại máy.
+    if /usr/sbin/sshd -t 2>/tmp/sshd-t.err; then
+        systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+        echo " ✓ sshd đã nạp cấu hình mới. Hiệu lực ngay:"
+        /usr/sbin/sshd -T 2>/dev/null | grep -iE "^(permitrootlogin|pubkeyauthentication|passwordauthentication)" | sed 's/^/     /'
+    else
+        echo " ✗ sshd -t báo lỗi cấu hình, KHÔNG khởi động lại để khỏi mất kết nối:"
+        sed 's/^/     /' /tmp/sshd-t.err
+    fi
+    # Gỡ chặn IP của máy quản trị nếu có fail2ban/csf.
+    fail2ban-client unban --all >/dev/null 2>&1 && echo " ✓ fail2ban: đã gỡ mọi IP bị chặn"
+    csf -tf >/dev/null 2>&1 && echo " ✓ csf: đã xoá danh sách chặn tạm"
+    echo
+    echo "=============================================="
+    echo " XONG. Từ máy quản trị thử ngay:  ssh root@$(hostname -I 2>/dev/null | awk '{print $1}')"
+    echo " (hoặc ssh botadmin@... rồi sudo -i nếu root vẫn bị chặn)"
+    echo "=============================================="
+else
+    echo "=============================================="
+    echo " XONG. Vào hPanel TẮT emergency mode để máy khởi động lại."
+    echo " Nếu ở trên có NHIỀU phân vùng, gửi toàn bộ màn hình này cho người hỗ trợ."
+    echo "=============================================="
+fi
