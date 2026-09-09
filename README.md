@@ -309,6 +309,46 @@ Từ 8 người / 2 phút (`CAPTCHA_AUTO_JOINS`), bot tự bật captcha cho **r
 trong 30 phút rồi tự tắt, dù công tắc chung đang tắt. Rose bắt admin tự bật tay; ở đây
 cửa chắn tự lên đúng lúc mà ngày thường bot vẫn im lặng.
 
+## Điều khiển từ terminal (CLI)
+
+Bật/tắt tính năng, xem ai đã bấm Start, thêm acc seeding — **không cần mở `.env`,
+không cần khởi động lại bot**. Bấm đúp `cli.bat` là ra menu tương tác (bấm số để đảo
+công tắc), hoặc gọi thẳng:
+
+```bash
+cli.bat list
+```
+
+```bash
+cli.bat on captcha
+```
+
+```bash
+cli.bat starters
+```
+
+```bash
+cli.bat seeding add 123456789 987654321
+```
+
+Trên Linux/droplet: `python -m antispam_bot.cli ...` với cùng tham số.
+
+CLI ghi thẳng vào `antispam.db` — đúng file bot đang dùng (SQLite WAL cho phép ghi song
+song). Ghi xong nó **đánh dấu đổi** (`cfg:version`), bot đang chạy thấy số đó khác là bỏ
+cache luật và nạp lại ngay ở tin nhắn kế tiếp. Cùng mật khẩu với lúc mở bot.
+
+## Acc seeding: lấy ID từ những người đã bấm Start
+
+Bảo từng acc seeding mở chat riêng với bot rồi bấm **Start** một lần. Sau đó:
+
+- Trong bot: 👥 Acc seeding → **📋 Ai đã bấm Start** (hoặc gõ `/starters`) — hiện ID kèm
+  tên, ID chưa là seeding gom sẵn một dòng `<code>` để bấm copy, và nút **➕ Thêm cả N acc**.
+- Trên terminal: `cli.bat starters` rồi `cli.bat seeding all`.
+
+Đừng bấm "thêm cả" mà không nhìn tên: **ai cũng bấm Start được**, kể cả kẻ spam đi dò
+bot. Muốn bot tự lọc thì dùng `/scan_accounts` — nó đếm số nhóm chung, acc có mặt ở
+2/3 số nhóm trở lên mới coi là của bạn.
+
 ## Sao lưu
 
 Whitelist, acc seeding, từ cấm, bộ nhớ chiến dịch, những gì bot đã học — tất cả nằm

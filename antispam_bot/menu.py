@@ -109,9 +109,19 @@ def man_seeding(ids: list[int], ten: dict[int, str]) -> tuple[str, InlineKeyboar
         "<i>Cách nhanh nhất: bảo từng acc bấm Start với bot, rồi bấm 🔍 Quét.</i>"
     )
     return chu, InlineKeyboardMarkup([
-        [_nut("➕ Thêm ID / @username", "nhap:user"), _nut("🔍 Quét tự động", "scan")],
-        [_nut("➖ Bớt", "nhap:deluser"), *_ve_menu()],
+        [_nut("📋 Ai đã bấm Start (ID)", "starters"), _nut("🔍 Quét tự động", "scan")],
+        [_nut("➕ Thêm ID / @username", "nhap:user"), _nut("➖ Bớt", "nhap:deluser")],
+        _ve_menu(),
     ])
+
+
+def man_starters(bang: str, so_moi: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Danh sách người đã bấm Start, kèm ID để copy và nút thêm hàng loạt."""
+    hang = []
+    if so_moi:
+        hang.append([_nut(f"➕ Thêm cả {so_moi} acc làm seeding", "seedall")])
+    hang.append([_nut("◀️ Acc seeding", "seed"), *_ve_menu()])
+    return bang, InlineKeyboardMarkup(hang)
 
 
 # --------------------------------------------------------------------------

@@ -85,8 +85,19 @@ async def get_flag(db: Storage, cfg: Config, ten: str) -> bool:
     return bool(getattr(cfg, ten, False))
 
 
+async def danh_dau_doi(db: Storage) -> None:
+    """Báo cho bot đang chạy: cấu hình/danh sách vừa đổi, bỏ cache luật đi.
+
+    Bot nướng công tắc và acc seeding vào cache luật 60 giây. CLI ghi thẳng
+    database thì bot không hay biết; đổi con số này là cách rẻ nhất để mọi
+    tiến trình đang chạy nạp lại ở tin nhắn kế tiếp - một lượt đọc 6µs.
+    """
+    await db.set_setting("cfg:version", str(time.time_ns()))
+
+
 async def set_flag(db: Storage, ten: str, bat: bool) -> None:
     await db.set_setting(f"cfg:{ten}", "1" if bat else "0")
+    await danh_dau_doi(db)
 
 
 async def all_flags(db: Storage, cfg: Config) -> dict[str, bool]:

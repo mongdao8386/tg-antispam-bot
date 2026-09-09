@@ -193,22 +193,27 @@ class ChatRules:
 
 
 def _invalidate_rules(context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Xoá cache của tiến trình này. Phiên bản trong database (cfg:version) lo
+    # phần còn lại - xem control.danh_dau_doi.
     """Xoá cache sau khi admin sửa danh sách, để lệnh có hiệu lực ngay."""
     context.application.bot_data.get("rules_cache", {}).clear()
     context.application.bot_data.pop("bot_admin_cache", None)
 
 
 async def _chat_rules(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> ChatRules:
-    cache: dict[int, tuple[float, ChatRules]] = context.application.bot_data.setdefault(
+    cache: dict[int, tuple[float, str, ChatRules]] = context.application.bot_data.setdefault(
         "rules_cache", {}
     )
-    hit = cache.get(chat_id)
-    now = time.monotonic()
-    if hit and now - hit[0] < RULES_CACHE_TTL:
-        return hit[1]
-
     cfg = _cfg(context)
     db = _db(context)
+    # Phiên bản cấu hình: CLI (hoặc /panel) ghi database xong thì đổi số này,
+    # cache dù còn hạn cũng phải dựng lại. Một lượt đọc 6µs mỗi tin, đổi lấy
+    # việc bật/tắt ngoài terminal có hiệu lực ngay chứ không đợi 60 giây.
+    phien = await db.get_setting("cfg:version") or ""
+    hit = cache.get(chat_id)
+    now = time.monotonic()
+    if hit and now - hit[0] < RULES_CACHE_TTL and hit[1] == phien:
+        return hit[2]
 
     ats = await db.get_usernames(chat_id)
     ats |= await _admin_usernames(chat_id, context)
@@ -234,7 +239,7 @@ async def _chat_rules(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> ChatR
         blocked=set(await db.get_blacklist(chat_id)) | set(await db.get_blacklist(GLOBAL)),
         at_ok=ats,
     )
-    cache[chat_id] = (now, rules)
+    cache[chat_id] = (now, phien, rules)
     return rules
 
 
@@ -2765,6 +2770,10 @@ async def _man_hinh(man: str, context: ContextTypes.DEFAULT_TYPE, la_owner: bool
         ten = {u: (t or tag) for u, t, tag, _ in await db.get_starters()}
         return menu.man_seeding(ids, ten)
 
+    if man == "starters":
+        chu, moi = await _van_ban_starters(context)
+        return menu.man_starters(chu, len(moi))
+
     if man == "tucam":
         co = set(await db.get_keywords(GLOBAL))
         bo = {
@@ -2917,6 +2926,13 @@ async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except TelegramError:
             pass
         return
+    elif man == "seedall":
+        _chu, moi = await _van_ban_starters(context)
+        for uid in moi:
+            await db.add_fwd_whitelist(GLOBAL, uid)
+        await control.danh_dau_doi(db)
+        _invalidate_rules(context)
+        bao = f"Đã thêm {len(moi)} acc làm seeding"; man = "seed"
     elif man == "hocxoa":
         n = await db.xoa_phan_hoi(None); bao = f"Đã xoá {n} mục"; man = "hoc"
     elif man == "scan":
@@ -3546,6 +3562,62 @@ async def _dem_nhom_chung(
     return dem
 
 
+async def _van_ban_starters(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, list[int]]:
+    """Ai đã bấm Start với bot, kèm ID để copy. Trả về (văn bản, ID chưa là seeding).
+
+    Khác /scan_accounts: không gọi Telegram đếm nhóm chung, nên hiện ngay.
+    Kẻ spam không bao giờ bấm Start với bot chống spam, nên danh sách này gần
+    như chỉ gồm người của mình - đủ để thêm thẳng làm seeding.
+    """
+    db, cfg = _db(context), _cfg(context)
+    st = await db.get_starters()
+    da_co = set(await db.get_fwd_whitelist(GLOBAL))
+    bo_qua = set(cfg.owner_ids) | await _bot_admin_ids(context)
+    dong, moi = [], []
+    for uid, ten, tag, _ts in st:
+        if uid in bo_qua:
+            continue
+        if uid not in da_co:
+            moi.append(uid)
+        dong.append(
+            f"{'✅' if uid in da_co else '▫️'} <code>{uid}</code> "
+            f"{html.escape((ten or '')[:24])}{(' @' + tag) if tag else ''}"
+        )
+    if not dong:
+        return (
+            "Chưa ai bấm Start với bot.\n\n"
+            "Bảo từng acc seeding mở chat riêng với bot rồi bấm <b>Start</b> "
+            "(chỉ một lần) - quay lại đây là thấy ID.", [],
+        )
+    chu = (
+        f"👥 <b>Đã bấm Start</b> ({len(dong)}) — ✅ đã là seeding\n"
+        + "\n".join(dong[:60])
+        + (f"\n<i>...còn {len(dong) - 60} acc nữa</i>" if len(dong) > 60 else "")
+    )
+    if moi:
+        chu += (
+            f"\n\n<b>ID chưa là seeding</b> ({len(moi)}) — bấm để copy:\n"
+            f"<code>{', '.join(map(str, moi))}</code>"
+        )
+    return chu, moi
+
+
+async def cmd_starters(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/starters — ai đã bấm Start với bot, kèm ID để copy vào whitelist."""
+    if not await _require_admin(update, context):
+        return
+    chu, moi = await _van_ban_starters(context)
+    nut = None
+    if moi:
+        nut = InlineKeyboardMarkup([[InlineKeyboardButton(
+            f"➕ Thêm cả {len(moi)} acc làm seeding", callback_data="m:seedall"
+        )]])
+    try:
+        await update.effective_message.reply_html(chu, reply_markup=nut)
+    except TelegramError as exc:
+        log.warning("Không hiện được danh sách Start: %s", exc)
+
+
 async def cmd_scan_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/scan_accounts [số nhóm tối thiểu] — tìm acc seeding của mình.
 
@@ -3598,7 +3670,10 @@ async def cmd_scan_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     for uid, ten, tag, so in ket:
         dau = "✅" if uid in da_co else ("⭐" if so >= toi_thieu else "▫️")
         ten_hien = html.escape(ten or str(uid))
-        dong.append(f"{dau} {ten_hien}{f' @{tag}' if tag else ''} — <b>{so}</b>/{len(nhom)} nhóm")
+        dong.append(
+            f"{dau} {ten_hien}{f' @{tag}' if tag else ''} <code>{uid}</code>"
+            f" — <b>{so}</b>/{len(nhom)} nhóm"
+        )
 
     nut = None
     if dat:
@@ -3893,6 +3968,7 @@ _OWNER_CMDS = [
     BotCommand("allow_content", "✅ Tha nội dung hay đăng lại (reply)"),
     BotCommand("add_word", "🚫 Cấm cụm từ"),
     BotCommand("add_user", "👥 Thêm acc seeding"),
+    BotCommand("starters", "📋 Ai đã bấm Start (ID để copy)"),
     BotCommand("scan_accounts", "🔎 Tự tìm acc seeding"),
     BotCommand("add_link", "🔗 Cho phép domain"),
     BotCommand("add_username", "@ Cho phép nhắc @"),
@@ -4326,6 +4402,7 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler("purge_all", cmd_quetlai))
     app.add_handler(CommandHandler("stop_purge", cmd_dungquet))
     app.add_handler(CommandHandler("scan_accounts", cmd_scan_accounts))
+    app.add_handler(CommandHandler("starters", cmd_starters))
     app.add_handler(CommandHandler("set_group", cmd_setgroup))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("start", cmd_start))

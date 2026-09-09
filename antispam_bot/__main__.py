@@ -22,6 +22,10 @@ def main() -> None:
 
     if "--dat-mat-khau" in sys.argv:
         raise SystemExit(console.dat_mat_khau())
+    if "--cli" in sys.argv:
+        from . import cli
+        sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a != "--cli"]
+        cli.main()
 
     cfg = Config.load()
 
