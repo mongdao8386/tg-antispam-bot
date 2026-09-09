@@ -1,112 +1,125 @@
 #!/bin/bash
 # =============================================================================
-#  CỨU HỘ: chạy trong RECOVERY MODE của Hostinger (hoặc rescue của nhà cung
-#  cấp khác) khi không SSH được vào VPS dù khoá đã nằm trong authorized_keys.
+#  CỨU HỘ: chạy trong RECOVERY / EMERGENCY MODE của Hostinger khi không SSH
+#  được vào VPS dù khoá đã nằm trong authorized_keys.
 #
 #  Triệu chứng đúng của ca này:  ssh -v báo "Server accepts key" rồi vẫn
-#  "Permission denied"  ->  sshd cấm root đăng nhập (PermitRootLogin no /
-#  AllowUsers không có root). Console cũng "Login incorrect" -> root bị khoá.
+#  "Permission denied"  ->  sshd cấm root (PermitRootLogin no / AllowUsers /
+#  AuthenticationMethods đòi thêm mật khẩu). Console cũng "Login incorrect".
 #
-#  Script làm gì (trên ĐĨA của VPS, đang được gắn vào hệ cứu hộ):
-#    1. Tìm phân vùng gốc của VPS (kể cả LVM) và mount vào /mnt/vps
-#    2. Cho root đăng nhập bằng KHOÁ (PermitRootLogin prohibit-password),
-#       gỡ AllowUsers/DenyUsers chặn root, bật PubkeyAuthentication
-#    3. Thêm khoá công khai của máy quản trị vào /root/.ssh/authorized_keys
-#    4. In ra những gì đã thấy để hiểu vì sao bị chặn
+#  Bản 2 - rút kinh nghiệm lần chạy đầu: hệ cứu hộ có thể mount NHIỀU đĩa
+#  (đĩa thật + đĩa backup) và ta đã sửa nhầm đĩa. Bản này:
+#    - liệt kê mọi đĩa/phân vùng kèm dung lượng để nhìn ra đĩa thật
+#    - sửa TẤT CẢ phân vùng có /etc/ssh (sửa nhầm đĩa backup thì vô hại)
+#    - sau khi sửa, chạy `sshd -T` trong chroot để in cấu hình HIỆU LỰC,
+#      không tin vào việc sed đã chạy
+#    - gỡ cả AuthenticationMethods, AllowUsers/Groups, DenyUsers chặn root
+#    - xoá khoá faillock/tally của root nếu có
 #
-#  KHÔNG đụng website, không đụng dữ liệu nào khác, không đổi mật khẩu ai.
-#  Xong thì tắt recovery mode trong hPanel để máy khởi động lại bình thường.
+#  KHÔNG đụng website, không đổi mật khẩu ai. Xong thì tắt emergency mode.
 #
 #  Dùng:  curl -fsSL https://raw.githubusercontent.com/mongdao8386/tg-antispam-bot/main/deploy/cuu-ho.sh | bash
 # =============================================================================
 set -u
 
 KHOA_URL="https://raw.githubusercontent.com/mongdao8386/tg-antispam-bot/main/deploy/khoa-admin.pub"
-# Dự phòng khi hệ cứu hộ không có mạng: khoá ghi thẳng ở đây (khoá CÔNG KHAI).
 KHOA_SAN="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHlXGqqZO8MTdv6emrNc/ymk1WO8Fr5kgAqvBEP5i/2B admin@DESKTOP-3P46HDN"
-MNT=/mnt/vps
 
 echo "=============================================="
-echo " Cứu hộ SSH cho VPS"
+echo " Cứu hộ SSH cho VPS (bản 2)"
 echo "=============================================="
 
-# --- 1. Tìm và mount phân vùng gốc ------------------------------------------
-TU_MOUNT=1
-GOC=""
-# Hostinger Emergency mode đã mount sẵn đĩa VPS: thẳng /mnt hoặc theo nhãn
-# /mnt/sda1, /mnt/sda2... - dùng luôn cái có /etc/ssh, đừng mount lại.
+# --- 0. Toàn cảnh đĩa: đĩa nào là đĩa thật? --------------------------------
+echo
+echo " Đĩa và phân vùng (đĩa thật của VPS là đĩa ~100G):"
+lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT 2>/dev/null | sed 's/^/   /'
+vgchange -ay >/dev/null 2>&1 || true
+
+# --- 1. Gom mọi phân vùng gốc: đã mount ở /mnt/* + mount thêm cái chưa mount ---
+GOCS=()
 for D in /mnt /mnt/*; do
-    if [ -d "$D/etc/ssh" ]; then
-        MNT="$D"; GOC="(đã mount sẵn ở $D bởi hệ cứu hộ)"; TU_MOUNT=0; break
-    fi
+    [ -d "$D/etc/ssh" ] && GOCS+=("$D")
 done
-vgchange -ay >/dev/null 2>&1 || true          # bật LVM nếu có
-mkdir -p "$MNT"
-# Thử từng phân vùng có hệ thống file Linux; cái nào có /etc/ssh là gốc.
-[ -n "$GOC" ] || while read -r DEV FS; do
+# Phân vùng Linux nào chưa được hệ cứu hộ mount (LVM, đĩa thứ hai...) thì mount thêm.
+i=0
+while read -r DEV FS; do
     [ -n "$FS" ] || continue
     case "$FS" in ext4|ext3|xfs|btrfs) ;; *) continue ;; esac
-    mountpoint -q "$MNT" && umount "$MNT" 2>/dev/null
-    if mount "$DEV" "$MNT" 2>/dev/null && [ -d "$MNT/etc/ssh" ]; then
-        GOC="$DEV"; break
+    grep -qs " $DEV " /proc/mounts && continue          # đã mount rồi
+    grep -qs "^$DEV " /proc/mounts && continue
+    i=$((i+1)); M="/mnt/cuu-ho-$i"; mkdir -p "$M"
+    if mount "$DEV" "$M" 2>/dev/null; then
+        if [ -d "$M/etc/ssh" ]; then GOCS+=("$M"); else umount "$M" 2>/dev/null; fi
     fi
-done < <(lsblk -rno PATH,FSTYPE 2>/dev/null || lsblk -rno NAME,FSTYPE | sed 's#^#/dev/#')
+done < <(lsblk -rno PATH,FSTYPE 2>/dev/null)
 
-if [ -z "$GOC" ]; then
-    echo " ✗ Không tìm thấy phân vùng gốc của VPS. Chạy 'lsblk -f' rồi mount tay:"
-    echo "     mount /dev/vdaX $MNT   (chọn phân vùng ext4 lớn nhất)"
-    echo "   sau đó chạy lại script này."
+if [ ${#GOCS[@]} -eq 0 ]; then
+    echo " ✗ Không thấy phân vùng nào có /etc/ssh. Gửi ảnh 'lsblk -f' ở trên cho người hỗ trợ."
     exit 1
 fi
-echo " ✓ Phân vùng gốc: $GOC  (đã mount vào $MNT)"
 
-# --- 2. Vì sao bị chặn? In ra trước khi sửa -----------------------------------
-echo
-echo " Cấu hình sshd hiện tại liên quan tới root:"
-grep -rHnE "^\s*(PermitRootLogin|AllowUsers|DenyUsers|AllowGroups|PubkeyAuthentication|PasswordAuthentication|Match)" \
-    "$MNT/etc/ssh/sshd_config" "$MNT"/etc/ssh/sshd_config.d/*.conf 2>/dev/null \
-    | sed "s#^$MNT#  #" || echo "  (không có dòng nào - dùng mặc định)"
-if grep -q '^root:!' "$MNT/etc/shadow" 2>/dev/null; then
-    echo "  root: mật khẩu ĐANG BỊ KHOÁ trong /etc/shadow (đăng nhập console không được)"
-fi
-
-# --- 3. Sửa sshd: cho root vào bằng khoá ---------------------------------------
-echo
-echo " Sửa sshd..."
-for F in "$MNT/etc/ssh/sshd_config" "$MNT"/etc/ssh/sshd_config.d/*.conf; do
-    [ -f "$F" ] || continue
-    sed -i -E 's/^\s*#?\s*PermitRootLogin\s+.*/PermitRootLogin prohibit-password/' "$F"
-    sed -i -E 's/^\s*PubkeyAuthentication\s+no/PubkeyAuthentication yes/' "$F"
-    # AllowUsers/DenyUsers/AllowGroups chặn root -> vô hiệu hoá dòng đó (giữ lại dạng chú thích).
-    sed -i -E 's/^(\s*(AllowUsers|DenyUsers|AllowGroups)\s+.*)$/# [cuu-ho] \1/' "$F"
-done
-# Bảo đảm có đúng một dòng PermitRootLogin ở file chính.
-grep -qE '^PermitRootLogin' "$MNT/etc/ssh/sshd_config" \
-    || echo "PermitRootLogin prohibit-password" >> "$MNT/etc/ssh/sshd_config"
-# Một số bản Ubuntu để file 50-cloud-init.conf đè lên; đặt thêm file ưu tiên cao nhất.
-mkdir -p "$MNT/etc/ssh/sshd_config.d"
-printf 'PermitRootLogin prohibit-password\nPubkeyAuthentication yes\n' > "$MNT/etc/ssh/sshd_config.d/00-cuu-ho.conf"
-echo " ✓ root được đăng nhập bằng khoá (không bằng mật khẩu)"
-
-# --- 4. Khoá công khai của máy quản trị --------------------------------------
-echo
 KHOA="$(curl -fsSL --max-time 10 "$KHOA_URL" 2>/dev/null || true)"
-[ -n "$KHOA" ] || { KHOA="$KHOA_SAN"; echo " (không tải được từ GitHub, dùng khoá ghi sẵn)"; }
-mkdir -p "$MNT/root/.ssh"
-touch "$MNT/root/.ssh/authorized_keys"
-grep -qF "$KHOA" "$MNT/root/.ssh/authorized_keys" || echo "$KHOA" >> "$MNT/root/.ssh/authorized_keys"
-chmod 700 "$MNT/root/.ssh"
-chmod 600 "$MNT/root/.ssh/authorized_keys"
-chown -R 0:0 "$MNT/root/.ssh"
-echo " ✓ Khoá đã nằm trong /root/.ssh/authorized_keys ($(wc -l < "$MNT/root/.ssh/authorized_keys") khoá)"
+[ -n "$KHOA" ] || { KHOA="$KHOA_SAN"; echo " (không tải được khoá từ GitHub, dùng khoá ghi sẵn)"; }
 
-# --- 5. Xong -------------------------------------------------------------------
+# --- 2. Sửa TỪNG phân vùng gốc ------------------------------------------------
+for MNT in "${GOCS[@]}"; do
+    echo
+    echo "=============================================="
+    echo " Phân vùng: $MNT"
+    echo "   hostname : $(cat "$MNT/etc/hostname" 2>/dev/null)"
+    echo "   machine  : $(cut -c1-12 "$MNT/etc/machine-id" 2>/dev/null)..."
+    echo "   log mới  : $(ls -t --time-style=long-iso -l "$MNT"/var/log/ 2>/dev/null | sed -n 2p | awk '{print $6, $7, $8}')"
+    echo "   web      : $(ls "$MNT/var/www" "$MNT/opt" 2>/dev/null | tr '\n' ' ' | cut -c1-60)"
+
+    echo
+    echo "   sshd TRƯỚC khi sửa:"
+    grep -rHnE "^\s*(PermitRootLogin|AllowUsers|DenyUsers|AllowGroups|DenyGroups|AuthenticationMethods|PubkeyAuthentication|PasswordAuthentication|AuthorizedKeysFile|Match|Include)" \
+        "$MNT/etc/ssh/sshd_config" "$MNT"/etc/ssh/sshd_config.d/*.conf 2>/dev/null | sed "s#^$MNT#     #" \
+        || echo "     (mặc định)"
+    grep -q '^root:!' "$MNT/etc/shadow" 2>/dev/null && echo "     root: mật khẩu bị khoá trong /etc/shadow"
+
+    # -- sửa --
+    for F in "$MNT/etc/ssh/sshd_config" "$MNT"/etc/ssh/sshd_config.d/*.conf; do
+        [ -f "$F" ] || continue
+        sed -i -E 's/^\s*#?\s*PermitRootLogin\s+.*/PermitRootLogin prohibit-password/' "$F"
+        sed -i -E 's/^\s*PubkeyAuthentication\s+no/PubkeyAuthentication yes/' "$F"
+        # Những dòng có thể chặn root hoặc đòi thêm mật khẩu -> vô hiệu hoá (giữ dạng chú thích).
+        sed -i -E 's/^(\s*(AllowUsers|DenyUsers|AllowGroups|DenyGroups|AuthenticationMethods)\s+.*)$/# [cuu-ho] \1/' "$F"
+    done
+    grep -qE '^PermitRootLogin' "$MNT/etc/ssh/sshd_config" \
+        || echo "PermitRootLogin prohibit-password" >> "$MNT/etc/ssh/sshd_config"
+    # Bảo đảm main config có Include (Ubuntu mặc định có; nếu bị xoá thì file .d vô dụng).
+    grep -qE '^\s*Include\s+/etc/ssh/sshd_config.d' "$MNT/etc/ssh/sshd_config" \
+        || sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' "$MNT/etc/ssh/sshd_config"
+    mkdir -p "$MNT/etc/ssh/sshd_config.d"
+    printf 'PermitRootLogin prohibit-password\nPubkeyAuthentication yes\nAuthorizedKeysFile .ssh/authorized_keys\n' \
+        > "$MNT/etc/ssh/sshd_config.d/00-cuu-ho.conf"
+
+    # -- khoá --
+    mkdir -p "$MNT/root/.ssh"; touch "$MNT/root/.ssh/authorized_keys"
+    grep -qF "$KHOA" "$MNT/root/.ssh/authorized_keys" || echo "$KHOA" >> "$MNT/root/.ssh/authorized_keys"
+    chmod 700 "$MNT/root/.ssh"; chmod 600 "$MNT/root/.ssh/authorized_keys"; chown -R 0:0 "$MNT/root/.ssh"
+    chmod 755 "$MNT/root" 2>/dev/null || chmod 700 "$MNT/root"
+
+    # -- gỡ khoá tài khoản do đăng nhập sai nhiều (faillock/tally) --
+    rm -f "$MNT"/var/run/faillock/root "$MNT"/var/lib/faillock/root 2>/dev/null
+    rm -f "$MNT"/var/log/tallylog 2>/dev/null
+
+    echo
+    echo "   sshd SAU khi sửa (cấu hình hiệu lực, chạy sshd -T trong chroot):"
+    chroot "$MNT" /usr/sbin/sshd -T 2>/dev/null \
+        | grep -iE "^(permitrootlogin|pubkeyauthentication|passwordauthentication|authenticationmethods|allowusers|denyusers|allowgroups|authorizedkeysfile)" \
+        | sed 's/^/     /' \
+        || echo "     (không chạy được sshd -T trong chroot - xem lại bằng grep bên dưới)"
+    grep -hE "^PermitRootLogin" "$MNT/etc/ssh/sshd_config.d/00-cuu-ho.conf" "$MNT/etc/ssh/sshd_config" | sed 's/^/     file: /'
+    echo "   authorized_keys: $(wc -l < "$MNT/root/.ssh/authorized_keys") khoá"
+    cut -c1-45 "$MNT/root/.ssh/authorized_keys" | sed 's/^/     /'
+done
+
 sync
-if [ "$TU_MOUNT" = 1 ]; then
-    umount "$MNT" 2>/dev/null && echo " ✓ Đã tháo $MNT"
-fi
+for M in /mnt/cuu-ho-*; do [ -d "$M" ] && umount "$M" 2>/dev/null; done
 echo
 echo "=============================================="
-echo " XONG. Giờ vào hPanel TẮT recovery mode để máy khởi động lại bình thường."
-echo " Sau đó từ máy quản trị:  ssh root@<IP>  là vào thẳng, không hỏi gì."
+echo " XONG. Vào hPanel TẮT emergency mode để máy khởi động lại."
+echo " Nếu ở trên có NHIỀU phân vùng, gửi toàn bộ màn hình này cho người hỗ trợ."
 echo "=============================================="
