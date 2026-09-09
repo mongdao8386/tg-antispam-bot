@@ -38,6 +38,26 @@ echo  Bot tren may nay DA TAT chua? (bam F4 trong cua so bot)
 set /p OK="  Go 'y' de tiep tuc: "
 if /i not "%OK%"=="y" exit /b 0
 
+REM Gan khoa SSH cua may nay len VPS. Chi lan ssh NAY hoi mat khau root;
+REM cac buoc sau dung khoa, khong hoi nua. Chay lai bat bao nhieu lan cung
+REM khong gan trung (co grep truoc khi them).
+REM (Khong dung khoi if(...) o day: %PUB% trong cung khoi voi set /p bi thay
+REM the TRUOC khi set /p chay -> rong. Dung nhan goto cho chac.)
+set "PUBFILE=%USERPROFILE%\.ssh\id_ed25519.pub"
+set "PUB="
+if exist "%PUBFILE%" set /p PUB=<"%PUBFILE%"
+if "%PUB%"=="" goto :caidat
+
+echo.
+echo  [0/3] Gan khoa SSH len VPS - nhap MAT KHAU ROOT cua VPS khi duoc hoi...
+ssh -o StrictHostKeyChecking=accept-new root@%IP% "mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && grep -qF '%PUB%' ~/.ssh/authorized_keys || echo '%PUB%' >> ~/.ssh/authorized_keys"
+if errorlevel 1 (
+    echo  [LOI] Khong vao duoc VPS. Kiem tra IP va mat khau root.
+    pause
+    exit /b 1
+)
+
+:caidat
 echo.
 echo  [1/3] Cai dat tren VPS (mat 2-4 phut)...
 echo  ---------------------------------------------------------

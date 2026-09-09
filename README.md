@@ -309,6 +309,23 @@ Từ 8 người / 2 phút (`CAPTCHA_AUTO_JOINS`), bot tự bật captcha cho **r
 trong 30 phút rồi tự tắt, dù công tắc chung đang tắt. Rose bắt admin tự bật tay; ở đây
 cửa chắn tự lên đúng lúc mà ngày thường bot vẫn im lặng.
 
+## Chạy trên VPS (Hostinger, DigitalOcean… — kể cả máy đang chạy thứ khác)
+
+Trên Windows, bấm đúp **`chuyen-sang-vps.bat`** (IP đặt sẵn trong file). Nó làm trọn:
+gắn khoá SSH của máy này lên VPS (hỏi mật khẩu root **một lần**), cài đặt qua
+`deploy/cai-dat-lan-dau.sh`, đẩy `.env` + `antispam.db`, bật dịch vụ, in log.
+
+**Tắt bot trên máy này trước** (F4). Telegram chỉ cho một tiến trình nhận tin cùng token —
+hai bot chạy song song là giật tin của nhau, cả hai đều lỗi.
+
+Script cài đặt được viết để **an toàn trên máy dùng chung**: tạo user `antispam` riêng,
+mọi thứ nằm trong `/opt/antispam`, **không bật `ufw`** (bật mà chỉ mở SSH là chặn luôn
+website đang chạy ở 80/443 — suýt xảy ra thật), không đổi múi giờ của máy (bot nhận giờ
+VN qua `Environment=TZ` trong file dịch vụ). Bot chỉ gọi ra ngoài, không cần mở cổng.
+
+Sau đó: `git push` là VPS tự lấy code mới trong 2 phút (`antispam-update.timer`).
+Điều khiển trên VPS: `ssh root@IP "cd /opt/antispam/app && /opt/antispam/venv/bin/python -m antispam_bot.cli"`.
+
 ## Điều khiển từ terminal (CLI)
 
 Bật/tắt tính năng, xem ai đã bấm Start, thêm acc seeding — **không cần mở `.env`,

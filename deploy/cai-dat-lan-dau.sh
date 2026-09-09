@@ -30,7 +30,8 @@ echo "=============================================="
 
 # --- 1. Gói hệ thống -------------------------------------------------------
 export DEBIAN_FRONTEND=noninteractive
-timedatectl set-timezone Asia/Ho_Chi_Minh || true
+# Không đổi múi giờ toàn máy: VPS có thể đang chạy thứ khác (website, cron).
+# Bot nhận giờ Việt Nam qua Environment=TZ trong file dịch vụ bên dưới.
 
 echo "[1/7] Cài gói hệ thống..."
 apt-get update -qq
@@ -110,6 +111,8 @@ Wants=network-online.target
 Type=simple
 User=antispam
 WorkingDirectory=/opt/antispam/app
+# Giờ Việt Nam cho riêng bot, không đổi múi giờ của cả máy.
+Environment=TZ=Asia/Ho_Chi_Minh
 EnvironmentFile=-/opt/antispam/app/.env
 ExecStart=/opt/antispam/venv/bin/python -m antispam_bot
 Restart=always
