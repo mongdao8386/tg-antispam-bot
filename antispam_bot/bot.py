@@ -3697,6 +3697,70 @@ async def on_forward_private(update: Update, context: ContextTypes.DEFAULT_TYPE)
         log.warning("Không trả lời được tin chuyển tiếp: %s", exc)
 
 
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/help — hướng dẫn và danh sách đủ mọi lệnh. Menu nút bấm vẫn là đường chính."""
+    if not await _require_admin(update, context):
+        return
+    trong_nhom = update.effective_message.chat.type != ChatType.PRIVATE
+    pham_vi = ("<i>Bạn đang gõ trong nhóm → lệnh chỉ áp dụng nhóm này. "
+               "Nhắn riêng bot → áp dụng mọi nhóm.</i>" if trong_nhom else
+               "<i>Bạn đang nhắn riêng → lệnh áp dụng MỌI nhóm. "
+               "Gõ trong một nhóm → chỉ nhóm đó.</i>")
+    await _quiet_reply(update, context, _HELP_TEXT.replace("{pham_vi}", pham_vi))
+
+
+_HELP_TEXT = """📖 <b>Hướng dẫn</b>
+
+{pham_vi}
+
+<b>Bắt đầu</b>
+/menu — mọi thứ bằng nút bấm, nên bắt đầu từ đây
+/status — trạng thái từng nhóm · /check — reply một tin để xem bot nghĩ gì
+
+<b>Khi ban oan</b>
+/undo — gỡ lượt ban vừa rồi (bot ghi nhớ, tự tắt luật hay bắt sai)
+/unban &lt;id&gt; · /trust &lt;id&gt; — tin cậy hoàn toàn, bỏ qua mọi luật
+/allow_content — reply một tin để tha nội dung đó khỏi luật chiến dịch
+/learned — bot đã học gì · <code>/learned reset</code> xoá bộ đếm
+
+<b>Acc seeding</b> (nick của bạn, miễn mọi luật)
+/scan_accounts — tự tìm sau khi các acc bấm Start với bot
+/add_user &lt;id | @user, ...&gt; · /delete_user · /list_users
+
+<b>Từ cấm</b> (ban ngay, có xét ngữ cảnh)
+/preset — nạp bộ dựng sẵn · /delete_preset &lt;tên&gt;
+/add_word &lt;cụm, cụm&gt; · /delete_word · /list_words
+
+<b>Được phép xuất hiện</b>
+/add_link &lt;domain&gt; · /delete_link · /list_links
+/add_username &lt;@user&gt; · /delete_username · /list_usernames
+/add_phone &lt;số&gt; · /delete_phone · /list_phones
+
+<b>Chặn cứng</b>
+/block_user &lt;id | @user&gt; · /unblock_user · /list_blocked
+
+<b>Chiến dịch rải</b>
+/campaigns — bot đang coi gì là chiến dịch (nhiều acc cùng đăng một bài/ảnh)
+
+<b>Điều khiển</b>
+/pause [phút] · /resume · /action ban|mute|delete|report
+/services join,leave,pin — tự xoá tin dịch vụ · <code>/services off</code>
+/purge_all — đuổi người đã ban khỏi mọi nhóm · /stop_purge
+/anon — kiểm tra bot đã ẩn danh chưa · /id — ID của bạn
+
+<b>Chỉ owner</b>
+/add_admin &lt;id&gt; · /delete_admin · /list_admins — bot admin (nick thật)
+/set_group — danh sách nhóm đang quản lý
+
+<b>Cách bot quyết định</b>
+Mỗi luật tự nó đủ để ban, không cộng điểm. Từ khoá được xét ngữ cảnh: hỏi
+"có lừa đảo không?" hay kể chuyện phim thì không bị. Bộ nhớ chiến dịch nhớ vân
+tay chữ lẫn ảnh xuyên mọi nhóm — kẻ spam đổi hết từ khoá vẫn dính khi đủ 3 acc
+cùng đăng. Bật <i>Captcha</i> trong ⚙️ khi bị bot army: người thật bấm một nút,
+tài khoản ảo thì không."""
+
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Chào hỏi khi người dùng bấm Start trong chat riêng."""
     msg = update.effective_message
@@ -3764,84 +3828,53 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # Telegram hiện menu theo đúng thứ tự này, nên xếp cái hay dùng lên trước.
 _OWNER_CMDS = [
-    # Điều khiển
-    BotCommand("panel", "🎛 Bảng điều khiển (bấm nút)"),
+    # Menu nut bam la giao dien chinh; day chi la duong tat cho nguoi da quen.
+    # Cac lenh delete_* / list_* van dung duoc, xem /help - khong liet ke o day
+    # cho danh sach ngan.
+    BotCommand("menu", "🎛 Mở menu nút bấm"),
+    BotCommand("help", "📖 Hướng dẫn và mọi lệnh"),
     BotCommand("status", "📊 Trạng thái mọi nhóm"),
+    BotCommand("check", "🔍 Thử một tin nhắn (reply)"),
+    BotCommand("undo", "↩️ Gỡ lượt ban vừa rồi"),
+    BotCommand("unban", "🔓 Gỡ chặn theo ID"),
+    BotCommand("trust", "🤝 Tin cậy hoàn toàn (reply/ID)"),
+    BotCommand("allow_content", "✅ Tha nội dung hay đăng lại (reply)"),
+    BotCommand("add_word", "🚫 Cấm cụm từ"),
+    BotCommand("add_user", "👥 Thêm acc seeding"),
+    BotCommand("scan_accounts", "🔎 Tự tìm acc seeding"),
+    BotCommand("add_link", "🔗 Cho phép domain"),
+    BotCommand("add_username", "@ Cho phép nhắc @"),
+    BotCommand("block_user", "⛔ Chặn cứng người/kênh"),
+    BotCommand("campaigns", "📡 Chiến dịch rải đã nhận ra"),
+    BotCommand("learned", "🧠 Bot đã học gì từ /undo"),
     BotCommand("pause", "⏸ Tạm ngưng xử phạt"),
     BotCommand("resume", "▶️ Bật lại"),
     BotCommand("action", "🔧 Đổi chế độ ban/mute/report"),
-    # Xem lại và sửa sai
-    BotCommand("last_bans", "📋 Các lượt ban gần đây"),
-    BotCommand("undo", "↩️ Gỡ lượt ban vừa rồi"),
-    BotCommand("unban", "🔓 Gỡ chặn theo ID"),
-    # Từ cấm
-    BotCommand("preset", "📦 Nạp bộ từ cấm dựng sẵn"),
-    BotCommand("delete_preset", "Gỡ bộ từ cấm"),
-    BotCommand("add_word", "➕ Cấm từ/cụm từ"),
-    BotCommand("delete_word", "➖ Bỏ từ cấm"),
-    BotCommand("list_words", "📄 Danh sách từ cấm"),
-    # Acc seeding
-    BotCommand("scan_accounts", "🔎 Tìm acc seeding của mình"),
-    BotCommand("add_user", "➕ Thêm acc seeding"),
-    BotCommand("delete_user", "➖ Xoá acc seeding"),
-    BotCommand("list_users", "📄 Danh sách acc seeding"),
-    # Link
-    BotCommand("add_link", "➕ Cho phép domain"),
-    BotCommand("delete_link", "➖ Bỏ domain"),
-    BotCommand("list_links", "📄 Danh sách domain"),
-    # @username
-    BotCommand("add_username", "➕ Cho phép nhắc @"),
-    BotCommand("delete_username", "➖ Bỏ @ được phép"),
-    BotCommand("list_usernames", "📄 Danh sách @ được phép"),
-    # Số điện thoại
-    BotCommand("add_phone", "➕ Cho phép số điện thoại"),
-    BotCommand("delete_phone", "➖ Bỏ số điện thoại"),
-    BotCommand("list_phones", "📄 Danh sách SĐT được phép"),
-    # Chặn cứng
-    BotCommand("block_user", "⛔ Chặn cứng người/kênh"),
-    BotCommand("unblock_user", "Bỏ chặn cứng"),
-    BotCommand("list_blocked", "📄 Danh sách chặn cứng"),
-    # Dọn dẹp hàng loạt
-    BotCommand("purge_all", "🧹 Đuổi người đã ban khỏi mọi nhóm"),
-    BotCommand("stop_purge", "⏹ Dừng việc dọn dẹp"),
-    # Quản trị
-    BotCommand("add_admin", "👤 Thêm bot admin"),
-    BotCommand("delete_admin", "Xoá bot admin"),
-    BotCommand("list_admins", "📄 Danh sách bot admin"),
-    BotCommand("set_group", "🗂 Quản lý danh sách nhóm"),
     BotCommand("services", "🧽 Tự xoá tin vào/rời/ghim"),
-    BotCommand("anon", "🕶 Kiểm tra bot đã ẩn danh chưa"),
-    BotCommand("id", "🆔 Xem ID Telegram của bạn"),
+    BotCommand("purge_all", "🧹 Đuổi người đã ban khỏi mọi nhóm"),
+    BotCommand("set_group", "🗂 Danh sách nhóm"),
+    BotCommand("add_admin", "👤 Thêm bot admin"),
+    BotCommand("id", "🆔 ID Telegram của bạn"),
 ]
 
 _GROUP_ADMIN_CMDS = [
-    BotCommand("panel", "Bảng điều khiển (bấm nút)"),
-    BotCommand("last_bans", "Xem các lượt ban gần đây"),
+    BotCommand("menu", "Mở menu nút bấm"),
+    BotCommand("help", "Hướng dẫn và mọi lệnh"),
+    BotCommand("check", "Thử một tin nhắn (reply)"),
     BotCommand("undo", "Gỡ lượt ban vừa rồi"),
-    BotCommand("status", "Trạng thái và thống kê"),
-    BotCommand("preset", "Nạp bộ từ cấm dựng sẵn"),
-    BotCommand("add_word", "Cấm từ ở nhóm này"),
-    BotCommand("scan_accounts", "Tìm acc seeding của mình"),
-    BotCommand("add_user", "Thêm acc seeding (reply hoặc id)"),
+    BotCommand("add_word", "Cấm cụm từ ở nhóm này"),
+    BotCommand("add_user", "Thêm acc seeding (reply/ID)"),
     BotCommand("add_link", "Cho phép domain ở nhóm này"),
     BotCommand("add_username", "Cho phép nhắc @username"),
-    BotCommand("add_phone", "Cho phép số điện thoại"),
-    BotCommand("list_usernames", "Danh sách @ được phép"),
-    BotCommand("block_user", "Chặn cứng (reply hoặc id)"),
-    BotCommand("services", "Tự xoá tin vào/rời/ghim nhóm"),
-    BotCommand("anon", "Kiểm tra bot đã ẩn danh chưa"),
-    BotCommand("check", "Thử xem tin nhắn có bị chặn không (reply)"),
-    BotCommand("campaigns", "Xem các chiến dịch rải đã nhận ra"),
-    BotCommand("allow_content", "Tha một nội dung hay bị đăng lại (reply)"),
-    BotCommand("learned", "Bot học được gì từ những lần bạn gỡ ban"),
-    BotCommand("trust", "Tin cậy hoàn toàn (reply hoặc id)"),
-    BotCommand("unban", "Gỡ chặn người dùng"),
-    BotCommand("id", "Xem chat_id / user_id"),
+    BotCommand("block_user", "Chặn cứng (reply/ID)"),
+    BotCommand("trust", "Tin cậy hoàn toàn (reply/ID)"),
+    BotCommand("allow_content", "Tha nội dung hay đăng lại (reply)"),
+    BotCommand("services", "Tự xoá tin vào/rời/ghim"),
 ]
 
 
 # Lệnh chỉ owner mới dùng được — ẩn khỏi menu của bot admin thường.
-_OWNER_ONLY = {"add_admin", "delete_admin", "set_group",
+_OWNER_ONLY = {"add_admin", "delete_admin", "set_group", "purge_all", "stop_purge",
                "purge_all", "stop_purge"}
 
 
@@ -4033,10 +4066,11 @@ async def _post_init(app: Application) -> None:
     """
     cfg: Config = app.bot_data["cfg"]
     db: Storage = app.bot_data["db"]
-    me = await app.bot.get_me()
-
-    await _setup_commands(app)
-    log_ok = await _check_log_chat(app)
+    # Ba việc độc lập, chạy song song. Mỗi cái là vài lượt gọi Telegram; nối
+    # đuôi nhau thì mỗi lần khởi động mất thêm vài giây vô ích.
+    me, log_ok, _ = await asyncio.gather(
+        app.bot.get_me(), _check_log_chat(app), _setup_commands(app)
+    )
 
     log.info("Bot: @%s : on  (%s)", me.username, cfg.action)
 
@@ -4180,57 +4214,58 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("check", cmd_check))
     app.add_handler(CommandHandler("trust", cmd_trust))
-    app.add_handler(CommandHandler(["allow_content", "tha_noidung"], cmd_allow_content))
-    app.add_handler(CommandHandler(["campaigns", "chien_dich"], cmd_campaigns))
-    app.add_handler(CommandHandler(["learned", "da_hoc"], cmd_learned))
+    app.add_handler(CommandHandler("allow_content", cmd_allow_content))
+    app.add_handler(CommandHandler("campaigns", cmd_campaigns))
+    app.add_handler(CommandHandler("learned", cmd_learned))
     app.add_handler(CommandHandler("unban", cmd_unban))
     # Acc seeding
-    app.add_handler(CommandHandler(["add_user", "adduser"], cmd_adduser))
-    app.add_handler(CommandHandler(["delete_user", "deluser"], cmd_deluser))
-    app.add_handler(CommandHandler(["list_users", "users"], cmd_users))
+    app.add_handler(CommandHandler("add_user", cmd_adduser))
+    app.add_handler(CommandHandler("delete_user", cmd_deluser))
+    app.add_handler(CommandHandler("list_users", cmd_users))
     # Bot admin
-    app.add_handler(CommandHandler(["add_admin", "addadm"], cmd_addadm))
-    app.add_handler(CommandHandler(["delete_admin", "deladm"], cmd_deladm))
-    app.add_handler(CommandHandler(["list_admins", "admins"], cmd_admins))
+    app.add_handler(CommandHandler("add_admin", cmd_addadm))
+    app.add_handler(CommandHandler("delete_admin", cmd_deladm))
+    app.add_handler(CommandHandler("list_admins", cmd_admins))
     # Keyword blacklist
-    app.add_handler(CommandHandler(["add_word", "addblacklist"], cmd_addblacklist))
-    app.add_handler(CommandHandler(["delete_word", "delblacklist"], cmd_delblacklist))
-    app.add_handler(CommandHandler(["list_words", "bwords"], cmd_bwords))
+    app.add_handler(CommandHandler("add_word", cmd_addblacklist))
+    app.add_handler(CommandHandler("delete_word", cmd_delblacklist))
+    app.add_handler(CommandHandler("list_words", cmd_bwords))
     app.add_handler(CommandHandler("preset", cmd_preset))
-    app.add_handler(CommandHandler(["delete_preset", "unpreset"], cmd_unpreset))
+    app.add_handler(CommandHandler("delete_preset", cmd_unpreset))
     # Domain whitelist
-    app.add_handler(CommandHandler(["add_link", "addlink"], cmd_addlink))
-    app.add_handler(CommandHandler(["delete_link", "dellink"], cmd_dellink))
-    app.add_handler(CommandHandler(["list_links", "links"], cmd_links))
+    app.add_handler(CommandHandler("add_link", cmd_addlink))
+    app.add_handler(CommandHandler("delete_link", cmd_dellink))
+    app.add_handler(CommandHandler("list_links", cmd_links))
     # @username được phép
-    app.add_handler(CommandHandler(["add_username", "addat"], cmd_addat))
-    app.add_handler(CommandHandler(["delete_username", "delat"], cmd_delat))
-    app.add_handler(CommandHandler(["list_usernames", "ats"], cmd_ats))
+    app.add_handler(CommandHandler("add_username", cmd_addat))
+    app.add_handler(CommandHandler("delete_username", cmd_delat))
+    app.add_handler(CommandHandler("list_usernames", cmd_ats))
     # Chặn cứng người/kênh
-    app.add_handler(CommandHandler(["block_user", "blockuser"], cmd_blockuser))
-    app.add_handler(CommandHandler(["unblock_user", "unblockuser"], cmd_unblockuser))
-    app.add_handler(CommandHandler(["list_blocked", "blocked"], cmd_blocked))
+    app.add_handler(CommandHandler("block_user", cmd_blockuser))
+    app.add_handler(CommandHandler("unblock_user", cmd_unblockuser))
+    app.add_handler(CommandHandler("list_blocked", cmd_blocked))
     # Bang dieu khien + bat/tat
     app.add_handler(CommandHandler(["panel", "menu"], cmd_panel))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("action", cmd_action))
-    app.add_handler(CommandHandler(["last_bans", "lastbans"], cmd_lastbans))
+    app.add_handler(CommandHandler("last_bans", cmd_lastbans))
     app.add_handler(CommandHandler("undo", cmd_undo))
     app.add_handler(CallbackQueryHandler(on_panel_button, pattern=r"^p:"))
     app.add_handler(CallbackQueryHandler(on_captcha_button, pattern=r"^cap:"))
     app.add_handler(CallbackQueryHandler(on_menu_button, pattern=r"^m:"))
     app.add_handler(CommandHandler("services", cmd_services))
     app.add_handler(CommandHandler("anon", cmd_anon))
-    app.add_handler(CommandHandler(["add_phone", "addphone"], cmd_addphone))
-    app.add_handler(CommandHandler(["delete_phone", "delphone"], cmd_delphone))
-    app.add_handler(CommandHandler(["list_phones", "phones"], cmd_phones))
-    app.add_handler(CommandHandler(["purge_all", "quetlai"], cmd_quetlai))
-    app.add_handler(CommandHandler(["stop_purge", "dungquet"], cmd_dungquet))
+    app.add_handler(CommandHandler("add_phone", cmd_addphone))
+    app.add_handler(CommandHandler("delete_phone", cmd_delphone))
+    app.add_handler(CommandHandler("list_phones", cmd_phones))
+    app.add_handler(CommandHandler("purge_all", cmd_quetlai))
+    app.add_handler(CommandHandler("stop_purge", cmd_dungquet))
     app.add_handler(CommandHandler("scan_accounts", cmd_scan_accounts))
-    app.add_handler(CommandHandler(["set_group", "setgroup"], cmd_setgroup))
+    app.add_handler(CommandHandler("set_group", cmd_setgroup))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
     # Chuyen tiep tin cho bot trong chat rieng -> hien ID kem nut them.
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & filters.REPLY,
