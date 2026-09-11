@@ -1312,9 +1312,31 @@ async def _captcha_xong(chat_id: int, user_id: int, context: ContextTypes.DEFAUL
         log.info("Captcha: ban %s (%s) sau %d lần trượt.", cho.ten, user_id, so_lan)
 
 
+async def _captcha_dang_bat(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Captcha còn hiệu lực với nhóm này không (công tắc chính hoặc tự bật)?"""
+    db, cfg = _db(context), _cfg(context)
+    if await control.get_flag(db, cfg, "captcha"):
+        return True
+    tam = context.bot_data.get("captcha_tam", {})
+    return (await control.get_flag(db, cfg, "captcha_tu_dong")
+            and tam.get(chat_id, 0) > time.time())
+
+
 async def _captcha_het_gio(context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id, user_id = context.job.data
-    await _captcha_xong(chat_id, user_id, context, qua=False)
+    # Admin tắt captcha trong lúc người này đang chờ -> thả ra, không đá.
+    # Tắt captcha là "thôi không kiểm nữa", không phải "đá hết người đang chờ".
+    qua = not await _captcha_dang_bat(chat_id, context)
+    await _captcha_xong(chat_id, user_id, context, qua=qua)
+
+
+async def _captcha_tha_het(context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Thả mọi người đang chờ captcha (gọi khi admin tắt công tắc). Trả về số người."""
+    context.bot_data.get("captcha_tam", {}).clear()
+    cho = list(_so_captcha.dang_cho.values())
+    for c in cho:
+        await _captcha_xong(c.chat_id, c.user_id, context, qua=True)
+    return len(cho)
 
 
 async def on_captcha_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1351,7 +1373,7 @@ async def on_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         # một lúc, dù công tắc chung đang tắt. Đây là cách giữ bot im lặng ngày
         # thường mà vẫn có cửa chắn đúng lúc cần - Rose bắt admin tự bật tay.
         tam = context.bot_data.setdefault("captcha_tam", {})
-        if cfg.captcha_auto_joins > 0:
+        if cfg.captcha_auto_joins > 0 and await control.get_flag(db, cfg, "captcha_tu_dong"):
             hang = context.bot_data.setdefault("dot_vao", {}).setdefault(
                 msg.chat_id, deque(maxlen=200)
             )
@@ -2901,6 +2923,10 @@ async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await control.set_flag(db, tham, moi)
             _invalidate_rules(context)
             bao = f"{control.CONG_TAC[tham]}: {'BẬT' if moi else 'TẮT'}"
+            if not moi and tham in ("captcha", "captcha_tu_dong"):
+                n = await _captcha_tha_het(context)
+                if n:
+                    bao += f" · đã thả {n} người đang chờ"
         man = "ct"
     elif man == "preset":
         co = set(await db.get_keywords(GLOBAL))
@@ -3283,6 +3309,8 @@ async def on_panel_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             moi = not await control.get_flag(db, cfg, ten)
             await control.set_flag(db, ten, moi)
             _invalidate_rules(context)
+            if not moi and ten in ("captcha", "captcha_tu_dong"):
+                await _captcha_tha_het(context)
             await q.answer(f"{control.CONG_TAC[ten]}: {'BẬT' if moi else 'TẮT'}")
             try:
                 await q.edit_message_reply_markup(

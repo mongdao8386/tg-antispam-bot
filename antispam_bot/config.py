@@ -150,6 +150,8 @@ class Config:
     # Bấy nhiêu người vào một nhóm trong 2 phút thì tự bật captcha cho nhóm
     # đó (0 = tắt). Cửa chắn tự lên đúng lúc mà ngày thường vẫn im lặng.
     captcha_auto_joins: int = 8
+    # Công tắc riêng cho phần tự bật (bật/tắt được trong menu và CLI).
+    captcha_tu_dong: bool = False
     captcha_auto_minutes: int = 30
 
     # --- Tự học từ những lần gỡ ban (xem tuhoc.py) ---
@@ -247,6 +249,7 @@ class Config:
             captcha=_bool("CAPTCHA", False),
             captcha_seconds=max(30, _int("CAPTCHA_SECONDS", 120)),
             captcha_auto_joins=_int("CAPTCHA_AUTO_JOINS", 8),
+            captcha_tu_dong=_bool("CAPTCHA_TU_DONG", False),
             captcha_auto_minutes=max(5, _int("CAPTCHA_AUTO_MINUTES", 30)),
             tu_hoc=_bool("TU_HOC", True),
             tu_hoc_nguong=_int("TU_HOC_NGUONG", 5),

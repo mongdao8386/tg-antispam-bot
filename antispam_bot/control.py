@@ -74,6 +74,7 @@ CONG_TAC = {
     "block_links": "Chặn link lạ",
     "chong_rai": "Chống rải hàng loạt",
     "captcha": "Captcha khi vào nhóm",
+    "captcha_tu_dong": "Tự bật captcha khi vào dồn dập",
 }
 
 
