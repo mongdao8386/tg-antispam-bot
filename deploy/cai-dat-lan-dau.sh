@@ -141,7 +141,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/opt/antispam/app/deploy/tu-cap-nhat.sh
+ExecStart=/bin/bash /opt/antispam/app/deploy/tu-cap-nhat.sh
 UNIT
 
 cat >/etc/systemd/system/antispam-update.timer <<'UNIT'

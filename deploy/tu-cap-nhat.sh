@@ -38,6 +38,11 @@ git_as log --oneline "${CU}..${MOI}" | sed 's/^/    /'
 # Không đụng tới file chưa theo dõi (.env, antispam.db) - chúng nằm trong
 # .gitignore nên vẫn nguyên.
 git_as reset --hard --quiet origin/main || { echo "reset thất bại"; exit 1; }
+# Git trên Windows commit file .sh với mode 644: lần reset --hard đầu tiên tước
+# mất +x của CHÍNH script này, và tự cập nhật chết im lặng (systemd 203/EXEC)
+# từ đó về sau - đã xảy ra thật, VPS đứng ở bản cũ 13 ngày. Unit giờ chạy qua
+# /bin/bash nên không cần +x nữa, nhưng vẫn cấp lại cho chắc.
+chmod +x "$APP"/deploy/*.sh 2>/dev/null || true
 
 # Thư viện có thể đổi theo commit.
 sudo -u antispam /opt/antispam/venv/bin/pip install -q -r requirements.txt
