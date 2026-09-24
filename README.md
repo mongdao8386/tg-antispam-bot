@@ -350,9 +350,17 @@ cli.bat seeding add 123456789 987654321
 
 Trên Linux/VPS: `python -m antispam_bot.cli ...` với cùng tham số.
 
-CLI ghi thẳng vào `antispam.db` — đúng file bot đang dùng (SQLite WAL cho phép ghi song
-song). Ghi xong nó **đánh dấu đổi** (`cfg:version`), bot đang chạy thấy số đó khác là bỏ
+CLI ghi thẳng vào `antispam.db` **nằm cạnh nó** — bot chạy ở đâu thì chạy CLI ở đó (bot trên
+VPS mà bấm `cli.bat` trên Windows là ghi vào file cũ, bot không hề biết; CLI in rõ đường dẫn
+đang ghi để khỏi nhầm). SQLite WAL cho phép ghi song song với bot. Ghi xong nó **đánh dấu đổi** (`cfg:version`), bot đang chạy thấy số đó khác là bỏ
 cache luật và nạp lại ngay ở tin nhắn kế tiếp. Cùng mật khẩu với lúc mở bot.
+
+## Hỏi bot "acc này được đối xử ra sao?"
+
+`/who 123456789` (hoặc `/who @nick`, hoặc reply vào tin của họ): seeding ở mọi nhóm hay chỉ
+vài nhóm, trusted, admin, chặn cứng, đã bấm Start chưa, đang có bao nhiêu lượt ban. Đây là
+câu trả lời cho *"thêm rồi mà vẫn bị đá"* — thường là thêm **trong một nhóm** (chỉ nhóm đó)
+thay vì nhắn riêng bot (mọi nhóm).
 
 ## Acc seeding: lấy ID từ những người đã bấm Start
 

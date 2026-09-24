@@ -341,6 +341,18 @@ class Storage:
         """Mọi user_id từng bị ban/mute, không trùng lặp."""
         return await self._run(self._banned_user_ids)
 
+    def _ban_cua(self, user_id: int) -> list[tuple[int, int, int]]:
+        cur = self._conn.execute(
+            "SELECT chat_id, user_id, MAX(ts) FROM offences"
+            " WHERE user_id=? AND action IN ('ban','mute') GROUP BY chat_id",
+            (user_id,),
+        )
+        return [(int(c), int(u), int(t)) for c, u, t in cur.fetchall()]
+
+    async def ban_cua(self, user_id: int) -> list[tuple[int, int, int]]:
+        """(chat_id, user_id, lần cuối) của mọi nhóm mà người này từng bị ban."""
+        return await self._run(self._ban_cua, user_id)
+
     def _banned_pairs(self) -> set[tuple[int, int]]:
         cur = self._conn.execute(
             "SELECT DISTINCT chat_id, user_id FROM offences WHERE action IN ('ban','mute')"

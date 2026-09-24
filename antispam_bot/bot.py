@@ -519,6 +519,11 @@ async def _is_exempt(msg: Message, context: ContextTypes.DEFAULT_TYPE) -> bool:
     # nói vậy; mã phải khớp lời hứa.
     if user.id in (await _chat_rules(chat.id, context)).seeding:
         return True
+    # /trust hứa "bỏ qua mọi luật". Trước đây trusted chỉ được xét SAU khối
+    # chống rải, mà khối đó đặt force_punish - nên trusted vẫn bị ban vì
+    # chiến dịch, rồi forget_member xoá luôn dòng trusted, không còn dấu vết.
+    if await _db(context).is_trusted(chat.id, user.id):
+        return True
     return False
 
 
@@ -854,7 +859,7 @@ async def _hot_ca_o(
                 await context.bot.ban_chat_member(gid, uid, revoke_messages=True)
             except TelegramError:
                 return
-            await db.log_offence(gid, uid, 1, "ban", ly_do, "", "")
+            await db.log_offence(gid, uid, 1, "ban", ly_do, "", "", van_tay_nd, loai)
             await db.forget_member(gid, uid)
             _theo_doi.quen(gid, uid)
             xong += 1
@@ -958,6 +963,13 @@ async def _punish(context: ContextTypes.DEFAULT_TYPE, msg: Message, action: str)
 # khởi động lại là quên hết - đúng ý muốn: không ai bị phạt vì chuyện hôm qua.
 _theo_doi = raivai.BoTheoDoi()
 
+# uid -> lúc bị ban. concurrent_updates=16: một acc bắn 20 nhóm trong vài giây
+# thì 20 tin được xử lý SONG SONG, tin nào cũng tự ban + tự đuổi khỏi 19 nhóm
+# kia = 400 lượt gọi Telegram cho một người. Ban rồi thì các tin còn lại chỉ
+# cần xoá, không ban lại.
+_vua_ban: dict[int, float] = {}
+VUA_BAN_GIAY = 120
+
 
 async def _xet_chien_dich(
     context: ContextTypes.DEFAULT_TYPE,
@@ -1011,6 +1023,15 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _warn_if_crippled(chat, context)
 
     if await _is_exempt(msg, context):
+        return
+
+    # Vừa bị ban ở nhóm khác trong ít giây trước: _ban_moi_nhom đang lo phần
+    # còn lại. Chỉ xoá tin này, không chấm lại, không ban lại.
+    if msg.from_user and _vua_ban.get(msg.from_user.id, 0) > time.time() - VUA_BAN_GIAY:
+        try:
+            await msg.delete()
+        except TelegramError:
+            pass
         return
 
     # Đang tạm ngưng (bấm nút hoặc /pause) thì bỏ qua hết, kể cả quét ảnh -
@@ -1163,6 +1184,12 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _report(context, chat, msg, verdict, action)
 
     if action == "ban":
+        if msg.sender_chat is None:
+            _vua_ban[uid] = time.time()
+            if len(_vua_ban) > 5000:
+                han = time.time() - VUA_BAN_GIAY
+                for u in [u for u, t in _vua_ban.items() if t < han]:
+                    _vua_ban.pop(u, None)
         # Bi ban roi thi khong con la thanh vien - xoa khoi bang members de
         # khong hien trong danh sach va khong tinh vao thong ke nua.
         await db.forget_member(chat.id, uid)
@@ -1809,6 +1836,57 @@ async def cmd_learned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"🧠 <b>Bot học từ {len(ph)} luật bạn từng gỡ</b>"
         f" (ngưỡng tự tắt: {cfg.tu_hoc_nguong})\n" + "\n".join(dong),
     )
+
+
+async def cmd_who(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/who <id|@user|reply> — acc này đang được bot đối xử ra sao, ở đâu.
+
+    Trước đây không có cách nào hỏi "acc X có được miễn ở nhóm Y không" - /check
+    chấm TIN chứ không chấm NGƯỜI. Muốn biết vì sao acc seeding vẫn bị ban thì
+    phải mở database. Giờ một lệnh trả lời hết.
+    """
+    if not await _require_admin(update, context):
+        return
+    ids, hong = await _parse_ids(update, context)
+    if not ids:
+        await _quiet_reply(update, context,
+                           "Dùng: <code>/who 123456789</code>, <code>/who @nick</code>, "
+                           "hoặc reply vào tin của người đó." + _bao_hong(hong))
+        return
+    db, cfg = _db(context), _cfg(context)
+    nhom = await _managed_groups(context)
+    bot_admins = await _bot_admin_ids(context)
+    seed_g = set(await db.get_fwd_whitelist(GLOBAL))
+    block_g = set(await db.get_blacklist(GLOBAL))
+    ten_st = {u: (t, tag) for u, t, tag, _ in await db.get_starters()}
+    ra = []
+    for uid in ids[:5]:
+        seed_nhom = [g for g in nhom if uid in await db.get_fwd_whitelist(g)]
+        trusted = [g for g in nhom if await db.is_trusted(g, uid)]
+        admin_o = [g for g in nhom if uid in await _admin_ids(g, context)]
+        ban = [(c, t) for c, u, t in await db.ban_cua(uid)]
+        t, tag = ten_st.get(uid, ("", ""))
+        dong = [f"👤 <b>{html.escape(t) if t else uid}</b>"
+                + (f" @{tag}" if tag else "") + f" (<code>{uid}</code>)"]
+        if uid in cfg.owner_ids: dong.append("• 👑 owner — miễn mọi luật")
+        if uid in bot_admins: dong.append("• 🛡 bot admin — miễn mọi luật")
+        if uid in seed_g: dong.append("• ✅ seeding <b>mọi nhóm</b> — miễn mọi luật")
+        elif seed_nhom: dong.append(f"• ✅ seeding ở {len(seed_nhom)}/{len(nhom)} nhóm — "
+                                    "<b>các nhóm khác vẫn quét</b>. Muốn mọi nhóm: nhắn riêng bot /add_user")
+        if trusted: dong.append(f"• 🤝 trusted ở {len(trusted)}/{len(nhom)} nhóm")
+        if admin_o: dong.append(f"• 👮 admin ở {len(admin_o)} nhóm")
+        if uid in block_g: dong.append("• ⛔ <b>chặn cứng</b> mọi nhóm")
+        if not (uid in cfg.owner_ids or uid in bot_admins or uid in seed_g or seed_nhom or trusted):
+            dong.append("• ▫️ người thường — mọi luật áp dụng")
+        dong.append("• đã bấm Start với bot" if uid in ten_st else "• chưa bấm Start với bot")
+        if ban:
+            khi = datetime.fromtimestamp(max(t for _, t in ban)).strftime("%H:%M %d/%m")
+            dong.append(f"• 🔨 đang có <b>{len(ban)}</b> lượt ban trong lịch sử, gần nhất {khi}"
+                        f" — gỡ hết: <code>/unban {uid}</code>")
+        else:
+            dong.append("• không có lượt ban nào")
+        ra.append("\n".join(dong))
+    await _quiet_reply(update, context, "\n\n".join(ra) + _bao_hong(hong))
 
 
 async def cmd_trust(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3025,7 +3103,9 @@ async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif man == "nhap":
         if tham not in menu.NHAP:
             await q.answer(); return
-        context.user_data["cho_nhap"] = (tham, time.time())
+        # Ghi vào DB, không phải user_data: VPS khởi động lại bot mỗi lần
+        # push, user_data (RAM) mất, người dùng gửi ID vào khoảng không.
+        await db.set_setting(f"nhap:{user.id}", f"{tham}:{int(time.time())}")
         await q.answer()
         try:
             await q.message.reply_html(menu.cau_hoi_nhap(tham), reply_markup=ForceReply(selective=True))
@@ -3058,16 +3138,37 @@ _LENH_NHAP = {
 
 async def on_nhap_private(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Người dùng vừa trả lời câu hỏi "gửi ID..." của menu."""
-    cho = context.user_data.get("cho_nhap")
-    if not cho:
-        return
-    loai, luc = cho
     msg = update.effective_message
-    chu = (msg.text or "").strip()
-    if time.time() - luc > NHAP_HET_HAN:
-        context.user_data.pop("cho_nhap", None)
+    user = update.effective_user
+    if user is None:
         return
-    context.user_data.pop("cho_nhap", None)
+    db, cfg = _db(context), _cfg(context)
+    chu = (msg.text or "").strip()
+    raw = await db.get_setting(f"nhap:{user.id}")
+    if not raw:
+        # Không có phiên nhập. Người thường nhắn linh tinh thì im (bot ẩn).
+        # Nhưng admin gửi thứ trông như ID/@/domain thì rõ ràng định thêm
+        # gì đó - nói cho họ biết đường, đừng nuốt im lặng như trước.
+        la_admin = user.id in cfg.owner_ids or await db.is_bot_admin(user.id)
+        giong_id = re.search(r"\d{7,}|^@\w{4,}|\w+\.[a-z]{2,}", chu)
+        if la_admin and giong_id and len(chu) < 200:
+            await _quiet_reply(
+                update, context,
+                "Bạn muốn thêm gì? Mở /menu rồi bấm nút ➕ tương ứng, hoặc gõ thẳng:\n"
+                f"<code>/add_user {html.escape(chu[:60])}</code> · "
+                f"<code>/add_link ...</code> · <code>/add_username ...</code>",
+            )
+        return
+    loai, _, luc = raw.partition(":")
+    await db.set_setting(f"nhap:{user.id}", "")
+    if loai not in menu.NHAP:
+        return
+    if time.time() - int(luc or 0) > NHAP_HET_HAN:
+        await _quiet_reply(
+            update, context,
+            "Phiên nhập đã hết hạn (5 phút). Bấm lại nút ➕ trong /menu rồi gửi lại.",
+        )
+        return
     if chu.lower() in ("huy", "huỷ", "hủy", "cancel", "/cancel"):
         await _quiet_reply(update, context, "Đã bỏ.")
         return
@@ -3117,21 +3218,36 @@ async def cmd_lastbans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def _undo_last(context: ContextTypes.DEFAULT_TYPE) -> str:
     """Gỡ lượt ban gần nhất. Trả về câu thông báo kết quả."""
-    rows = await _db(context).recent_bans(1)
+    db = _db(context)
+    rows = await db.recent_bans(60)
     if not rows:
         return "Chưa có lượt ban nào để gỡ."
     _id, chat_id, uid, ts, score, reasons, excerpt, name, vt, loai_vt = rows[0]
     ai = html.escape(name) if name else str(uid)
-    try:
-        await context.bot.unban_chat_member(chat_id, uid, only_if_banned=True)
-        await _db(context).clear_offences(chat_id, uid)
-    except TelegramError as exc:
-        return f"Không gỡ được <code>{uid}</code>: {html.escape(str(exc))}"
+
+    # Một acc đăng 20 nhóm bị ban 20 lượt trong vài giây: "gỡ lượt vừa rồi"
+    # phải gỡ trọn người đó ở mọi nhóm, không phải bắt bấm 20 lần - và tính
+    # MỘT phiếu tự học, không phải 20 (5 phiếu là bot tự tắt chống rải).
+    cac_nhom = {r[1] for r in rows if r[2] == uid and abs(r[3] - ts) <= 600}
+    cac_nhom |= {c for c, u in await db.banned_pairs() if u == uid}
+    _vua_ban.pop(uid, None)
+    xong, loi = 0, ""
+    for gid in sorted(cac_nhom):
+        try:
+            await context.bot.unban_chat_member(gid, uid, only_if_banned=True)
+            xong += 1
+        except TelegramError as exc:
+            loi = str(exc)
+        await db.clear_offences(gid, uid)
+    if not xong:
+        return f"Không gỡ được <code>{uid}</code>: {html.escape(loi or 'không rõ')}"
 
     hoc = await _hoc_tu_go(context, reasons, excerpt, vt, loai_vt)
     return (
-        f"↩️ Đã gỡ <b>{ai}</b> (<code>{uid}</code>) và xoá lịch sử vi phạm.\n"
+        f"↩️ Đã gỡ <b>{ai}</b> (<code>{uid}</code>) ở <b>{xong}</b> nhóm và xoá lịch sử vi phạm.\n"
         f"Lý do bị ban: {html.escape(reasons[:120])}" + hoc
+        + "\n<i>Là người của mình? Thêm làm seeding để không bị lại: "
+        f"<code>/add_user {uid}</code></i>"
     )
 
 
@@ -3930,6 +4046,7 @@ _HELP_TEXT = """📖 <b>Hướng dẫn</b>
 <b>Bắt đầu</b>
 /menu — mọi thứ bằng nút bấm, nên bắt đầu từ đây
 /status — trạng thái từng nhóm · /check — reply một tin để xem bot nghĩ gì
+/who &lt;id | @user | reply&gt; — acc này có được miễn không, ở nhóm nào, bị ban chưa
 
 <b>Khi ban oan</b>
 /undo — gỡ lượt ban vừa rồi (bot ghi nhớ, tự tắt luật hay bắt sai)
@@ -4049,6 +4166,7 @@ _OWNER_CMDS = [
     BotCommand("help", "📖 Hướng dẫn và mọi lệnh"),
     BotCommand("status", "📊 Trạng thái mọi nhóm"),
     BotCommand("check", "🔍 Thử một tin nhắn (reply)"),
+    BotCommand("who", "👤 Acc này được đối xử ra sao? (id/@/reply)"),
     BotCommand("undo", "↩️ Gỡ lượt ban vừa rồi"),
     BotCommand("unban", "🔓 Gỡ chặn theo ID"),
     BotCommand("trust", "🤝 Tin cậy hoàn toàn (reply/ID)"),
@@ -4076,6 +4194,7 @@ _GROUP_ADMIN_CMDS = [
     BotCommand("menu", "Mở menu nút bấm"),
     BotCommand("help", "Hướng dẫn và mọi lệnh"),
     BotCommand("check", "Thử một tin nhắn (reply)"),
+    BotCommand("who", "Acc này được đối xử ra sao? (id/@/reply)"),
     BotCommand("undo", "Gỡ lượt ban vừa rồi"),
     BotCommand("add_word", "Cấm cụm từ ở nhóm này"),
     BotCommand("add_user", "Thêm acc seeding (reply/ID)"),
@@ -4461,6 +4580,7 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("check", cmd_check))
     app.add_handler(CommandHandler("trust", cmd_trust))
+    app.add_handler(CommandHandler("who", cmd_who))
     app.add_handler(CommandHandler("allow_content", cmd_allow_content))
     app.add_handler(CommandHandler("campaigns", cmd_campaigns))
     app.add_handler(CommandHandler("learned", cmd_learned))

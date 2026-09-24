@@ -208,6 +208,11 @@ async def chay(argv: list[str]) -> int:
     cfg = Config.load()
     if not console.hoi_mat_khau(cfg.start_password):
         return 1
+    duong = cfg.db_path.resolve()
+    if not cfg.db_path.exists():
+        print(f"  {DO}Không thấy {duong} - CLI sẽ tạo file MỚI, rỗng. Bot đang chạy ở máy khác"
+              f" (VPS)? Thì chạy CLI ở đó, ở đây không tác dụng.{HET}")
+    print(f"  {XAM}Ghi vào: {duong}  (bot chạy ở máy khác thì lệnh này không tới nó){HET}")
     db = Storage(cfg.db_path)
     try:
         lenh = (argv[0] if argv else "").lower()
