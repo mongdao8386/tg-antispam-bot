@@ -513,7 +513,30 @@ async def _is_exempt(msg: Message, context: ContextTypes.DEFAULT_TYPE) -> bool:
         return True
     if user.id in await _admin_ids(chat.id, context):
         return True
+    # Acc seeding = nick của chủ bot. Miễn MỌI luật, y như admin - trước đây
+    # chỉ miễn forward/@/chiến dịch, còn link, từ khoá, ví crypto vẫn bắt.
+    # Chủ bot ghi rõ "acc seeding = miễn mọi luật" và hướng dẫn trong bot cũng
+    # nói vậy; mã phải khớp lời hứa.
+    if user.id in (await _chat_rules(chat.id, context)).seeding:
+        return True
     return False
+
+
+async def _mien_ban(uid: int, gid: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Người này có được miễn BAN ở nhóm này không? Dùng cho mọi đường ban gián
+    tiếp (hốt cả ổ, đuổi mọi nhóm, quét lại) - những đường không đi qua scan()
+    nên không được _is_exempt che chở."""
+    cfg, db = _cfg(context), _db(context)
+    if uid in cfg.owner_ids or uid in await _bot_admin_ids(context):
+        return True
+    try:
+        if uid in await _admin_ids(gid, context):
+            return True
+    except TelegramError:
+        pass
+    if uid in (await _chat_rules(gid, context)).seeding:
+        return True
+    return await db.is_trusted(gid, uid)
 
 
 def _extract_facts(
@@ -757,13 +780,9 @@ async def _ban_moi_nhom(
 
     async def duoi(gid: int) -> None:
         async with gioi_han:
-            # Admin của nhóm khác thì tha - có thể họ chỉ trùng tên hoặc là
-            # người của mình ở nhóm đó.
-            try:
-                if uid in await _admin_ids(gid, context):
-                    return
-            except TelegramError:
-                pass
+            # Admin, seeding, trusted ở nhóm đó thì tha - là người của mình.
+            if await _mien_ban(uid, gid, context):
+                return
             try:
                 await context.bot.ban_chat_member(gid, uid, revoke_messages=True)
                 await db.forget_member(gid, uid)
@@ -826,7 +845,10 @@ async def _hot_ca_o(
     async def duoi(uid: int, gid: int) -> None:
         nonlocal xong
         async with gioi_han:
-            if uid in bo_qua or uid in await _admin_ids(gid, context):
+            # _mien_ban gồm cả seeding + trusted. Trước đây chỉ tha owner/admin:
+            # acc seeding đăng bài của chủ bot TRƯỚC khi được thêm vào danh sách
+            # thì mỗi lần bài đó "nổ" lại bị hốt - 54 lượt trong 30 ngày.
+            if uid in bo_qua or await _mien_ban(uid, gid, context):
                 return
             try:
                 await context.bot.ban_chat_member(gid, uid, revoke_messages=True)
@@ -960,6 +982,20 @@ async def _xet_chien_dich(
     db = _db(context)
     vt, so_acc = await db.ghi_noi_dung(vt, mau, user_id, chat_id, loai)
     if so_acc < nguong or await db.noi_dung_duoc_tha(vt, loai):
+        return None
+
+    # Acc seeding không tính vào ngưỡng, và bài nào có acc seeding từng đăng là
+    # bài của chủ bot - tha luôn, ghi nhớ để lần sau khỏi tra lại. Không có
+    # bước này thì quảng cáo của chính chủ bot (5 acc seeding cùng đăng) là
+    # một "chiến dịch" vĩnh viễn, ai đăng lại cũng bị ban làm acc thứ 6.
+    seeding = (await _chat_rules(chat_id, context)).seeding
+    cac_acc = {u for u, _c in await db.acc_cua_noi_dung(vt, loai)}
+    if cac_acc & seeding:
+        await db.tha_noi_dung(vt, loai)
+        log.info("Tha nội dung %s: có acc seeding đã đăng.", vt)
+        return None
+    so_acc = len(cac_acc - seeding)
+    if so_acc < nguong:
         return None
     cai_gi = "một tấm ảnh" if loai == "a" else "bài này"
     return f"{so_acc} tài khoản khác nhau cùng đăng {cai_gi} (chiến dịch rải)", vt
@@ -2027,9 +2063,14 @@ async def cmd_adduser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     db = _db(context)
     for uid in ids:
         await db.add_fwd_whitelist(scope, uid)
+    await control.danh_dau_doi(db)
+    _invalidate_rules(context)
+    # Bài họ đã đăng trước đó không còn là "chiến dịch" nữa.
+    da_tha = await db.tha_noi_dung_cua(set(ids))
     await _quiet_reply(
         update, context,
         f"✅ Thêm <b>{len(ids)}</b> acc seeding ở {_scope_label(scope)}:\n{_danh_sach(ids)}"
+        + (f"\n<i>Đã tha {da_tha} nội dung họ từng đăng.</i>" if da_tha else "")
         + _bao_hong(hong),
     )
 
@@ -2958,6 +2999,7 @@ async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await db.add_fwd_whitelist(GLOBAL, uid)
         await control.danh_dau_doi(db)
         _invalidate_rules(context)
+        await db.tha_noi_dung_cua(set(moi))
         bao = f"Đã thêm {len(moi)} acc làm seeding"; man = "seed"
     elif man == "hocxoa":
         n = await db.xoa_phan_hoi(None); bao = f"Đã xoá {n} mục"; man = "hoc"
@@ -3429,6 +3471,7 @@ async def _chay_quet_lai(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_i
     """
     bd = context.application.bot_data
     db = _db(context)
+    cfg = _cfg(context)
     nhom = await _managed_groups(context)
     da_ban = await db.banned_pairs()          # {(chat_id, user_id)} đã ban rồi
     nguoi = await db.banned_user_ids()
@@ -3439,10 +3482,15 @@ async def _chay_quet_lai(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_i
         bd.pop("quet_dang_chay", None)
         return
 
-    # Admin của từng nhóm - tha, không đuổi nhầm người của mình.
+    # Người của mình ở từng nhóm - admin, seeding, trusted - tha hết. Quét
+    # lại là lấy danh sách "từng bị ban" ra đuổi; acc seeding từng bị ban oan
+    # mà không tha ở đây là đuổi họ khỏi cả 20 nhóm một lượt.
     admin_nhom: dict[int, set[int]] = {}
     for gid in nhom:
-        admin_nhom[gid] = await _admin_ids(gid, context)
+        rules = await _chat_rules(gid, context)
+        admin_nhom[gid] = set(await _admin_ids(gid, context)) | rules.seeding
+    seeding_moi_nhom = set(await db.get_fwd_whitelist(GLOBAL))
+    nguoi = [u for u in nguoi if u not in seeding_moi_nhom and u not in cfg.owner_ids]
 
     tong = len(nguoi)
     gioi_han = asyncio.Semaphore(4)
@@ -3457,6 +3505,8 @@ async def _chay_quet_lai(context: ContextTypes.DEFAULT_TYPE, chat_id: int, msg_i
             if bd.get("quet_dung"):
                 return so
             if (gid, uid) in da_ban or uid in admin_nhom.get(gid, ()):
+                continue
+            if await db.is_trusted(gid, uid):
                 continue
             async with gioi_han:
                 try:
@@ -4278,6 +4328,13 @@ async def _post_init(app: Application) -> None:
             ocr.UNAVAILABLE_REASON or "không rõ nguyên nhân",
         )
 
+    # Tha ngay nội dung của acc seeding đang có - chữa dữ liệu cũ ghi từ lúc
+    # họ chưa được thêm vào danh sách.
+    class _Ctx:  # đủ cho _tha_noi_dung_seeding: chỉ cần bot_data
+        bot_data = app.bot_data
+        application = app
+    await _tha_noi_dung_seeding(_Ctx())
+
     # Dọn bộ nhớ nội dung mỗi ngày. Nội dung chỉ một người đăng thì không
     # bao giờ thành chiến dịch, giữ lại chỉ làm phình database.
     if app.job_queue:
@@ -4307,7 +4364,20 @@ async def _sao_luu(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.warning("Sao lưu database thất bại: %s", exc)
 
 
+async def _tha_noi_dung_seeding(context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Nội dung do acc seeding đăng là của chủ bot - tha hết khỏi luật chiến dịch."""
+    db = _db(context)
+    seed = set(await db.get_fwd_whitelist(GLOBAL))
+    for gid in await _managed_groups(context):
+        seed |= set(await db.get_fwd_whitelist(gid))
+    n = await db.tha_noi_dung_cua(seed)
+    if n:
+        log.info("Tha %d nội dung do acc seeding đăng (không còn là chiến dịch).", n)
+    return n
+
+
 async def _don_bo_nho(context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _tha_noi_dung_seeding(context)
     xoa = await context.bot_data["db"].don_noi_dung(GIU_NOI_DUNG_NGAY)
     if xoa:
         log.info("Dọn bộ nhớ nội dung: bỏ %d bài không thành chiến dịch.", xoa)

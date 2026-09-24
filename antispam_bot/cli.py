@@ -140,6 +140,7 @@ async def _seeding(db: Storage, cfg: Config, args: list[str]) -> int:
         moi = await _starters(db, cfg)
         for u in moi:
             await db.add_fwd_whitelist(GLOBAL, u)
+        await db.tha_noi_dung_cua(set(moi))
         await control.danh_dau_doi(db)
         print(f"  {XANH}Đã thêm {len(moi)} acc làm seeding.{HET}\n")
         return 0
@@ -154,7 +155,9 @@ async def _seeding(db: Storage, cfg: Config, args: list[str]) -> int:
     if viec == "add":
         for u in ids:
             await db.add_fwd_whitelist(GLOBAL, u)
-        print(f"  {XANH}Đã thêm {len(ids)} acc seeding.{HET}")
+        n = await db.tha_noi_dung_cua(set(ids))
+        print(f"  {XANH}Đã thêm {len(ids)} acc seeding.{HET}"
+              + (f" Đã tha {n} nội dung họ từng đăng." if n else ""))
     elif viec in ("del", "delete", "remove"):
         n = 0
         for u in ids:

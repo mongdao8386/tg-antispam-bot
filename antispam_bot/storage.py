@@ -863,6 +863,32 @@ class Storage:
     ) -> list[tuple[int, int, str, str]]:
         return await self._run(self._cac_chien_dich, toi_thieu, gioi_han)
 
+    def _tha_noi_dung_cua(self, cac_uid: set[int]) -> int:
+        """Tha mọi nội dung mà bất kỳ acc nào trong `cac_uid` (seeding) đã đăng.
+
+        Vì sao cần: 5 acc seeding của chủ bot cùng đăng một tấm quảng cáo thì
+        tấm đó có 5 "tài khoản khác nhau" trong bộ nhớ chiến dịch - đủ ngưỡng
+        vĩnh viễn. Từ đó bất kỳ acc nào chưa kịp vào danh sách seeding đăng lại
+        tấm đó là bị ban ngay làm acc thứ 6. Đo được: 114/176 lượt ban acc
+        seeding trong 30 ngày là vì thế. Nội dung do acc seeding đăng là nội
+        dung CỦA CHỦ BOT, không bao giờ là chiến dịch.
+
+        Trả về số nội dung vừa được tha thêm.
+        """
+        if not cac_uid:
+            return 0
+        cho = ",".join("?" * len(cac_uid))
+        cur = self._conn.execute(
+            f"INSERT OR IGNORE INTO noi_dung_tha (van_tay, loai)"
+            f" SELECT DISTINCT van_tay, loai FROM noi_dung_acc WHERE user_id IN ({cho})",
+            tuple(cac_uid),
+        )
+        self._conn.commit()
+        return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+    async def tha_noi_dung_cua(self, cac_uid: set[int]) -> int:
+        return await self._run(self._tha_noi_dung_cua, cac_uid)
+
     def _noi_dung_duoc_tha(self, vt: int, loai: str = "t") -> bool:
         cur = self._conn.execute(
             "SELECT 1 FROM noi_dung_tha WHERE van_tay=? AND loai=?", (sang_sqlite(vt), loai)
