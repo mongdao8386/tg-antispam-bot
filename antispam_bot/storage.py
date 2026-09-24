@@ -644,6 +644,20 @@ class Storage:
         )
         return cur.fetchall()
 
+    def _tim_uid_theo_username(self, username: str) -> int | None:
+        u = username.lstrip("@").strip().lower()
+        if not u:
+            return None
+        cur = self._conn.execute(
+            "SELECT user_id FROM starters WHERE lower(username)=? ORDER BY ts DESC LIMIT 1", (u,)
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else None
+
+    async def tim_uid_theo_username(self, username: str) -> int | None:
+        """ID của người đã bấm Start có @username này. None nếu chưa từng bấm."""
+        return await self._run(self._tim_uid_theo_username, username)
+
     async def get_starters(self) -> list[tuple[int, str, str, int]]:
         """Danh sách (id, tên, @username, lúc bấm Start), mới nhất trước."""
         return await self._run(self._get_starters)

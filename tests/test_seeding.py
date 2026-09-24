@@ -76,3 +76,13 @@ def test_them_seeding_roi_van_ghi_duoc_luot_dang_moi():
     db._tha_noi_dung_cua({1})
     _, n = db._ghi_noi_dung(v, QC, 2, -1)
     assert n == 2 and db._noi_dung_duoc_tha(v)
+
+
+def test_tra_username_cuc_bo_tu_starters():
+    """Acc đã bấm Start thì /add_user @nick phải ra ID mà không cần hỏi Telegram."""
+    db = _db()
+    db._add_starter(8261190651, "Minh Quân 94", "onalswas")
+    assert db._tim_uid_theo_username("@onalswas") == 8261190651
+    assert db._tim_uid_theo_username("ONALSWAS") == 8261190651, "không phân biệt hoa thường"
+    assert db._tim_uid_theo_username("@khong_co") is None
+    assert db._tim_uid_theo_username("") is None

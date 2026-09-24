@@ -1908,8 +1908,15 @@ async def _parse_ids(
             if so not in ra:
                 ra.append(so)
             continue
-        # Không phải số -> coi là @username, nhờ Telegram tra hộ.
+        # Không phải số -> coi là @username. Tra CỤC BỘ trước: ai đã bấm Start
+        # với bot đều có username trong bảng starters. Bot API getChat chỉ tra
+        # được @ của kênh/nhóm/bot, KHÔNG tra được người thường - trước đây
+        # /add_user @nick_seeding luôn thất bại và báo sai là "viết sai tên".
         ten = phan.lstrip("@")
+        uid_cuc_bo = await _db(context).tim_uid_theo_username(ten)
+        if uid_cuc_bo:
+            ra.append(uid_cuc_bo)
+            continue
         try:
             chat = await context.bot.get_chat(f"@{ten}")
             if chat.id not in ra:
@@ -1944,8 +1951,10 @@ def _bao_hong(hong: list[str]) -> str:
         return ""
     return (
         f"\n\n⚠️ Không tra được: {', '.join(f'<code>{html.escape(h)}</code>' for h in hong)}\n"
-        "@username phải công khai và viết đúng. Nick không đặt @ thì reply vào "
-        "tin của họ, hoặc chuyển tiếp tin đó cho bot."
+        "Telegram không cho bot tra @username của người thường. Ba cách chắc ăn:\n"
+        "• bảo acc đó bấm <b>Start</b> với bot rồi gõ lại lệnh này\n"
+        "• reply vào một tin của họ rồi gõ <code>/add_user</code>\n"
+        "• chuyển tiếp tin của họ cho bot (chat riêng), bấm nút ➕"
     )
 
 
@@ -4507,7 +4516,10 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler("help", cmd_help))
     # Chuyen tiep tin cho bot trong chat rieng -> hien ID kem nut them.
     app.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & filters.REPLY,
+        # Không bắt buộc reply: bấm ➕ rồi gõ trần cũng phải nhận. Trước đây
+        # tin không reply bị bỏ qua IM LẶNG, người dùng tưởng đã thêm xong.
+        # ~FORWARDED để tin chuyển tiếp vẫn tới on_forward_private (cùng group).
+        filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND & ~filters.FORWARDED,
         on_nhap_private,
     ))
     app.add_handler(MessageHandler(
