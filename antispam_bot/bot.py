@@ -3979,6 +3979,145 @@ async def cmd_setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _quiet_reply(update, context, f"✅ Đang quản lý {len(ids)} nhóm:\n{listed}")
 
 
+# ---------------------------------------------------------------------------
+# Bot tự rời nhóm — /leave
+# ---------------------------------------------------------------------------
+
+
+async def _ten_nhom(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Tên nhóm đã thoát HTML, để hiện cạnh chat_id."""
+    try:
+        g = await context.bot.get_chat(chat_id)
+        return html.escape(g.title or "?")
+    except TelegramError:
+        return "<i>không truy cập được</i>"
+
+
+async def _roi_nhom(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    """Rời một nhóm rồi bỏ nó khỏi danh sách quản lý. Trả về lỗi, None là xong.
+
+    Dữ liệu của nhóm (từ cấm, seeding...) vẫn giữ trong DB như khi bị kick -
+    thêm bot vào lại là dùng tiếp được.
+    """
+    try:
+        await context.bot.leave_chat(chat_id)
+    except Forbidden:
+        # Bot vốn không còn trong nhóm. Coi như đã rời, chỉ còn việc dọn danh sách.
+        pass
+    except TelegramError as exc:
+        return str(exc)
+    await _drop_group(chat_id, context, "owner cho rời bằng /leave")
+    return None
+
+
+async def cmd_leave(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/leave — bot tự rời nhóm (chỉ owner).
+
+    Trong nhóm:  /leave               → rời chính nhóm đó
+    Nhắn riêng:  /leave               → xem danh sách nhóm kèm chat_id
+                 /leave -100111       → hỏi lại cho chắc
+                 /leave -100111 ok    → rời (ghi được nhiều chat_id một lúc)
+    """
+    msg = update.effective_message
+    if msg is None:
+        return
+    if not _require_owner(update, context):
+        try:
+            await msg.delete()
+        except TelegramError:
+            pass
+        return
+
+    args = context.args or []
+
+    if msg.chat.type != ChatType.PRIVATE:
+        # Không nhắn gì ra nhóm: xoá lệnh, rời, rồi báo kết quả qua chat riêng.
+        # Không hỏi lại - gõ ở nhóm nào thì nhóm đó đã quá rõ.
+        try:
+            await msg.delete()
+        except TelegramError:
+            pass
+        ten = html.escape(msg.chat.title or str(msg.chat_id))
+        if any(a.lower() != "ok" for a in args):
+            # /leave -100222 gõ trong nhóm khác: không đoán ý, kẻo rời nhầm nhóm.
+            bao = (
+                f"Trong nhóm chỉ gõ <code>/leave</code> trần để rời chính nhóm đó "
+                f"(<b>{ten}</b> chưa bị rời).\n"
+                "Muốn rời nhóm khác thì nhắn ở đây: <code>/leave &lt;chat_id&gt;</code>"
+            )
+        else:
+            loi = await _roi_nhom(msg.chat_id, context)
+            bao = (
+                f"✅ Đã rời nhóm <b>{ten}</b> (<code>{msg.chat_id}</code>)."
+                if loi is None else
+                f"⚠️ Không rời được nhóm <b>{ten}</b>: {html.escape(loi)}"
+            )
+        try:
+            await context.bot.send_message(update.effective_user.id, bao, parse_mode="HTML")
+        except TelegramError as exc:
+            log.debug("Không báo được kết quả /leave cho owner: %s", exc)
+        return
+
+    chac = False
+    ids: list[int] = []
+    for r in args:
+        if r.lower() == "ok":
+            chac = True
+            continue
+        try:
+            cid = int(r)
+        except ValueError:
+            cid = 0
+        # chat_id của nhóm luôn âm; số dương là ID người dùng.
+        if cid >= 0:
+            await _quiet_reply(
+                update, context,
+                f"<code>{html.escape(r)}</code> không phải chat_id hợp lệ (dạng -100...).",
+            )
+            return
+        if cid not in ids:
+            ids.append(cid)
+
+    if not ids:
+        groups = await _managed_groups(context)
+        lines = [f"• <code>{g}</code> — {await _ten_nhom(g, context)}" for g in groups]
+        await _quiet_reply(
+            update, context,
+            (f"<b>Nhóm đang quản lý</b> ({len(groups)}):\n" + "\n".join(lines) + "\n\n"
+             if groups else "")
+            + "<code>/leave &lt;chat_id&gt;</code> — bot rời nhóm đó.\n"
+            "Hoặc gõ <code>/leave</code> ngay trong nhóm muốn rời.",
+        )
+        return
+
+    lines = [f"• <code>{i}</code> — {await _ten_nhom(i, context)}" for i in ids]
+    if not chac:
+        await _quiet_reply(
+            update, context,
+            f"⚠️ Bot sẽ rời <b>{len(ids)}</b> nhóm:\n" + "\n".join(lines) + "\n\n"
+            "Rời rồi bot không tự vào lại được — phải có người thêm lại và cấp "
+            "quyền admin. Dữ liệu của nhóm (từ cấm, seeding...) vẫn giữ.\n\n"
+            f"Chắc chắn thì gõ: <code>/leave {' '.join(str(i) for i in ids)} ok</code>",
+        )
+        return
+
+    xong: list[str] = []
+    hong: list[str] = []
+    for i, dong in zip(ids, lines):
+        loi = await _roi_nhom(i, context)
+        if loi is None:
+            xong.append(dong)
+        else:
+            hong.append(f"{dong}: {html.escape(loi)}")
+    text = ""
+    if xong:
+        text += f"✅ Đã rời <b>{len(xong)}</b> nhóm:\n" + "\n".join(xong) + "\n\n"
+    if hong:
+        text += "⚠️ Không rời được:\n" + "\n".join(hong) + "\n\n"
+    text += f"Còn lại: <b>{len(await _managed_groups(context))}</b> nhóm."
+    await _quiet_reply(update, context, text)
+
+
 async def on_forward_private(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Chuyển tiếp tin của ai đó cho bot (chat riêng) -> hiện ID kèm nút thêm.
 
@@ -4082,6 +4221,7 @@ _HELP_TEXT = """📖 <b>Hướng dẫn</b>
 <b>Chỉ owner</b>
 /add_admin &lt;id&gt; · /delete_admin · /list_admins — bot admin (nick thật)
 /set_group — danh sách nhóm đang quản lý
+/leave — bot tự rời nhóm: gõ trong nhóm đó, hoặc nhắn riêng kèm chat_id
 
 <b>Cách bot quyết định</b>
 Mỗi luật tự nó đủ để ban, không cộng điểm. Từ khoá được xét ngữ cảnh: hỏi
@@ -4186,6 +4326,7 @@ _OWNER_CMDS = [
     BotCommand("services", "🧽 Tự xoá tin vào/rời/ghim"),
     BotCommand("purge_all", "🧹 Đuổi người đã ban khỏi mọi nhóm"),
     BotCommand("set_group", "🗂 Danh sách nhóm"),
+    BotCommand("leave", "🚪 Bot rời một nhóm"),
     BotCommand("add_admin", "👤 Thêm bot admin"),
     BotCommand("id", "🆔 ID Telegram của bạn"),
 ]
@@ -4208,7 +4349,7 @@ _GROUP_ADMIN_CMDS = [
 
 
 # Lệnh chỉ owner mới dùng được — ẩn khỏi menu của bot admin thường.
-_OWNER_ONLY = {"add_admin", "delete_admin", "set_group", "purge_all", "stop_purge",
+_OWNER_ONLY = {"add_admin", "delete_admin", "set_group", "leave", "purge_all", "stop_purge",
                "purge_all", "stop_purge"}
 
 
@@ -4631,6 +4772,7 @@ def build_application(cfg: Config) -> Application:
     app.add_handler(CommandHandler("scan_accounts", cmd_scan_accounts))
     app.add_handler(CommandHandler("starters", cmd_starters))
     app.add_handler(CommandHandler("set_group", cmd_setgroup))
+    app.add_handler(CommandHandler("leave", cmd_leave))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
