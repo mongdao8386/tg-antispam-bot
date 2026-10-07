@@ -81,6 +81,7 @@ ANH_CAN_IT_NHAT = 1280
 # Cắt đuôi "(+3)" trong lý do khi gửi log - người đọc không cần con số
 RULES_CACHE_TTL = 60   # giây - lệnh admin xoá cache ngay nên đây chỉ là lưới an toàn
 SELF_DESTRUCT = 20     # giây - thời gian sống của phản hồi lệnh quản trị
+TIN_TOI_DA = 4000      # Telegram cho 4096 ký tự một tin; chừa chỗ vì thẻ HTML tính khác
 
 MUTED = ChatPermissions(
     can_send_messages=False,
@@ -1506,10 +1507,34 @@ async def _delete_later(context: ContextTypes.DEFAULT_TYPE) -> None:
             pass
 
 
+def _chia_tin(text: str, toi_da: int = TIN_TOI_DA) -> list[str]:
+    """Cắt tin dài thành nhiều tin, ưu tiên cắt ở dòng trống rồi tới xuống dòng.
+
+    /status với 21 nhóm dài hơn 4096 ký tự: Telegram từ chối "Message is too
+    long" và người gõ lệnh không nhận được gì - đã xảy ra thật. Thẻ HTML trong
+    bot luôn đóng ngay trong dòng, nên cắt theo dòng không làm hỏng định dạng.
+    """
+    if len(text) <= toi_da:
+        return [text]
+    phan: list[str] = []
+    while len(text) > toi_da:
+        cat = text.rfind("\n\n", 0, toi_da)
+        if cat < toi_da // 2:
+            cat = text.rfind("\n", 0, toi_da)
+        if cat < toi_da // 2:
+            cat = toi_da   # một dòng dài bất thường: đành cắt ngang
+        phan.append(text[:cat].rstrip("\n"))
+        text = text[cat:].lstrip("\n")
+    if text:
+        phan.append(text)
+    return phan
+
+
 async def _quiet_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     """Trả lời rồi tự xoá sau SELF_DESTRUCT giây, để nhóm luôn sạch.
 
     Trong chat riêng thì giữ lại - người dùng cần đọc và copy nội dung.
+    Tin dài quá giới hạn Telegram được cắt thành nhiều tin nối tiếp.
     """
     # Điểm chốt duy nhất để làm mới cache: mọi lệnh đều kết thúc ở đây, nên
     # lệnh vừa sửa danh sách sẽ có hiệu lực ngay. Đặt ở một chỗ thay vì rải
@@ -1520,8 +1545,9 @@ async def _quiet_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text:
     msg = update.effective_message
     ids = [msg.message_id]
     try:
-        sent = await msg.reply_html(text, disable_web_page_preview=True)
-        ids.append(sent.message_id)
+        for phan in _chia_tin(text):
+            sent = await msg.reply_html(phan, disable_web_page_preview=True)
+            ids.append(sent.message_id)
     except TelegramError as exc:
         log.warning("Không trả lời được lệnh: %s", exc)
 
