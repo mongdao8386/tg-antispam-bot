@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+import contextlib
 import html
 import logging
 import os
 import re
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -48,7 +50,10 @@ from telegram.ext import (
     filters,
 )
 
-from . import anhhash, captcha, control, menu, ngucanh, ocr, presets, qrscan, raivai, tuhoc, vantay
+from . import (
+    anhhash, captcha, control, menu, ngucanh, ocr, presets, qrscan, raivai, trunglap, tuhoc,
+    vantay,
+)
 from .config import VALID_ACTIONS, Config
 from .detector import MessageFacts, Verdict, analyse
 from .normalize import (
@@ -78,6 +83,9 @@ IMAGE_TOTAL_BUDGET = 30.0
 # đủ nét sẽ nhanh hơn hẳn trên mạng yếu, trong khi OCR/QR không kém đi vì
 # 1280px đã thừa cho chữ quảng cáo và mã QR cỡ thường.
 ANH_CAN_IT_NHAT = 1280
+# Video tới 20MB (trần của Bot API) nặng gấp chục lần ảnh, nên có hạn riêng.
+VIDEO_READ_TIMEOUT = 60.0
+VIDEO_TOTAL_BUDGET = 90.0
 # Cắt đuôi "(+3)" trong lý do khi gửi log - người đọc không cần con số
 RULES_CACHE_TTL = 60   # giây - lệnh admin xoá cache ngay nên đây chỉ là lưới an toàn
 SELF_DESTRUCT = 20     # giây - thời gian sống của phản hồi lệnh quản trị
@@ -645,19 +653,22 @@ def _image_ref(msg: Message, max_bytes: int) -> tuple[str, str] | None:
 
 
 async def _scan_image(
-    msg: Message, context: ContextTypes.DEFAULT_TYPE
+    msg: Message, context: ContextTypes.DEFAULT_TYPE, can_van_tay: bool = False
 ) -> tuple[bool, list[str], str, int | None]:
     """Soi ảnh: (có QR, nội dung QR, chữ trong ảnh, vân tay ảnh).
 
     Tải ảnh về ĐÚNG MỘT LẦN rồi dùng chung cho cả QR lẫn OCR - trước đây mỗi
-    thứ tải riêng là phí băng thông và thời gian.
+    thứ tải riêng là phí băng thông và thời gian. can_van_tay: cần vân tay cho
+    chống trùng dù công tắc chống rải đang tắt.
     """
     cfg = _cfg(context)
     db = _db(context)
     # Đọc qua công tắc để /panel bật/tắt được ngay, không cần khởi động lại.
     want_qr = await control.get_flag(db, cfg, "scan_qr") and qrscan.AVAILABLE
     want_ocr = await control.get_flag(db, cfg, "scan_ocr") and ocr.AVAILABLE
-    want_vt = await control.get_flag(db, cfg, "chong_rai") and anhhash.AVAILABLE
+    want_vt = (
+        can_van_tay or await control.get_flag(db, cfg, "chong_rai")
+    ) and anhhash.AVAILABLE
     if not want_qr and not want_ocr and not want_vt:
         return False, [], "", None
 
@@ -1014,6 +1025,164 @@ async def _xet_chien_dich(
     return f"{so_acc} tài khoản khác nhau cùng đăng {cai_gi} (chiến dịch rải)", vt
 
 
+# --- Chống ảnh/video đăng lại (xem trunglap.py) ---
+
+# Chính người đó đăng lại trong bấy nhiêu giây thì cho qua: thường là xoá đi
+# đăng lại để sửa chú thích. Đăng lại để đẩy bài thì cách nhau hàng giờ.
+CHO_SUA_GIAY = 600
+# Tin báo trong nhóm tự xoá sau chừng này giây.
+BAO_TRUNG_SONG = 10
+# Mỗi người chỉ bị báo một lần trong chừng này giây: đăng lại album 10 tấm là
+# 10 tin, báo 10 lần thì nhóm ngập tin của bot.
+BAO_TRUNG_CACH = 60
+_da_bao_trung: dict[tuple[int, int], float] = {}
+
+
+def _so_giay(thoi_luong) -> int:
+    """Thời lượng video: số giây ở PTB 22, timedelta từ PTB 23."""
+    if isinstance(thoi_luong, timedelta):
+        return int(thoi_luong.total_seconds())
+    return int(thoi_luong or 0)
+
+
+def _luc_truoc(giay: float) -> str:
+    giay = max(0, int(giay))
+    if giay < 3600:
+        return f"{max(1, giay // 60)} phút trước"
+    if giay < 86400:
+        return f"{giay // 3600} giờ trước"
+    return f"{giay // 86400} ngày trước"
+
+
+def _link_tin(chat: Chat, message_id: int) -> str:
+    """Link tới một tin trong nhóm. Nhóm thường (chưa lên supergroup) không có."""
+    if chat.username:
+        return f"https://t.me/{chat.username}/{message_id}"
+    so = str(chat.id)
+    return f"https://t.me/c/{so[4:]}/{message_id}" if so.startswith("-100") else ""
+
+
+async def _van_tay_video_tin(context: ContextTypes.DEFAULT_TYPE, video) -> list[int | None]:
+    """Tải video về file tạm rồi lấy vân tay ba khung. Rỗng nếu không làm được."""
+    if not trunglap.AVAILABLE or (video.file_size or 0) > trunglap.TOI_DA_TAI:
+        return []
+    fd, duong_dan = tempfile.mkstemp(prefix="trung-", suffix=".mp4")
+    os.close(fd)
+    try:
+        try:
+            tep = await context.bot.get_file(video.file_id)
+            await asyncio.wait_for(
+                tep.download_to_drive(duong_dan, read_timeout=VIDEO_READ_TIMEOUT),
+                timeout=VIDEO_TOTAL_BUDGET,
+            )
+        except (TelegramError, asyncio.TimeoutError, OSError) as exc:
+            log.warning("Không tải được video %s để so trùng: %s", video.file_unique_id, exc)
+            return []
+        return await trunglap.van_tay_video(duong_dan, _so_giay(video.duration))
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(duong_dan)
+
+
+async def _bao_trung(
+    context: ContextTypes.DEFAULT_TYPE, msg: Message, cai_gi: str, mid_cu: int, ts_cu: int
+) -> None:
+    """Một tin ngắn trong nhóm cho người vừa bị xoá biết vì sao, tự xoá sau
+    BAO_TRUNG_SONG giây."""
+    user = msg.from_user
+    uid = msg.sender_chat.id if msg.sender_chat else (user.id if user else 0)
+    now = time.time()
+    if _da_bao_trung.get((msg.chat_id, uid), 0) > now - BAO_TRUNG_CACH:
+        return
+    _da_bao_trung[(msg.chat_id, uid)] = now
+    if len(_da_bao_trung) > 5000:
+        for k in [k for k, t in _da_bao_trung.items() if t < now - BAO_TRUNG_CACH]:
+            _da_bao_trung.pop(k, None)
+
+    if msg.sender_chat is None and user is not None:
+        ai = f'<a href="tg://user?id={user.id}">{html.escape(user.full_name)}</a>'
+    else:
+        ai = f"<b>{html.escape(msg.sender_chat.title if msg.sender_chat else '?')}</b>"
+    link = _link_tin(msg.chat, mid_cu)
+    goc = f' (<a href="{link}">bản gốc</a>)' if link else ""
+    text = (
+        f"♻️ {ai}: {cai_gi} này đã có trong nhóm từ {_luc_truoc(now - ts_cu)}{goc}, "
+        "bot đã xoá bản đăng lại."
+    )
+    try:
+        sent = await context.bot.send_message(
+            msg.chat_id, text, parse_mode="HTML", disable_web_page_preview=True,
+            disable_notification=True,
+            message_thread_id=msg.message_thread_id if msg.is_topic_message else None,
+        )
+    except TelegramError as exc:
+        log.warning("Không gửi được tin báo trùng ở %s: %s", msg.chat_id, exc)
+        return
+    if context.job_queue:
+        context.job_queue.run_once(
+            _delete_later, BAO_TRUNG_SONG, data=(msg.chat_id, [sent.message_id])
+        )
+
+
+async def _xet_trung_lap(
+    context: ContextTypes.DEFAULT_TYPE, msg: Message, vt_anh: int | None
+) -> bool:
+    """Ảnh/video này đã có trong nhóm mấy ngày qua thì xoá bản đăng lại.
+
+    Chỉ gọi cho tin mới đã qua hết luật spam, ở nhóm có trong CHONG_TRUNG_NHOM.
+    Người được miễn (admin, seeding, trusted) không bao giờ tới được đây - acc
+    seeding đăng lại quảng cáo của chủ bot mỗi ngày là việc của họ. vt_anh là
+    vân tay _scan_image vừa tính, khỏi tải ảnh lần nữa.
+
+    Trả về True nếu là bản trùng.
+    """
+    cfg, db = _cfg(context), _db(context)
+    uid = msg.sender_chat.id if msg.sender_chat else (msg.from_user.id if msg.from_user else 0)
+    if msg.photo:
+        loai, media, thoi_luong, cai_gi = "photo", msg.photo[-1], 0, "ảnh"
+    else:
+        loai, media, cai_gi = "video", msg.video, "video"
+        thoi_luong = _so_giay(msg.video.duration)
+    chung = dict(
+        chat_id=msg.chat_id, message_id=msg.message_id, user_id=uid, loai=loai,
+        file_uid=media.file_unique_id, thoi_luong=thoi_luong,
+        giu_giay=cfg.chong_trung_ngay * 86400, cho_sua_giay=CHO_SUA_GIAY,
+    )
+
+    cu = None
+    if loai == "photo":
+        cac_vt = [vt_anh]
+    else:
+        # Gửi lại đúng file cũ thì tra file_unique_id là đủ - khỏi tải 20MB.
+        cu = await db.media_trung_hoac_ghi(**chung, ghi=False)
+        cac_vt = [] if cu else await _van_tay_video_tin(context, msg.video)
+    if cu is None:
+        cu = await db.media_trung_hoac_ghi(
+            **chung, file_hash=trunglap.ma_hoa(cac_vt),
+            so=trunglap.bo_so(cac_vt, thoi_luong, cfg.chong_trung_lech),
+        )
+    if cu is None:
+        return False
+
+    mid_cu, _uid_cu, ts_cu = cu
+    che_do = await control.effective_action(db, cfg)
+    if che_do != "report":
+        try:
+            await msg.delete()
+        except TelegramError as exc:
+            # Không xoá được thì đừng báo là đã xoá.
+            log.warning("Không xoá được %s trùng %s: %s", cai_gi, msg.message_id, exc)
+            return True
+        if await control.get_flag(db, cfg, "chong_trung_bao"):
+            await _bao_trung(context, msg, cai_gi, mid_cu, ts_cu)
+    ly_do = f"{cai_gi} đăng lại, trùng tin {mid_cu} từ {_luc_truoc(time.time() - ts_cu)}"
+    await _report(
+        context, msg.chat, msg, Verdict(reasons=[ly_do]),
+        "report" if che_do == "report" else "delete",
+    )
+    return True
+
+
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
     chat = update.effective_chat
@@ -1110,7 +1279,18 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not force_punish:
             fwd_exempt = msg.from_user.id in rules.seeding
 
-    has_qr, qr_payloads, ocr_text, vt_anh = await _scan_image(msg, context)
+    # Chống ảnh/video đăng lại. Chỉ tin MỚI: sửa chú thích thì Telegram gửi lại
+    # cả tin, mà tin đó dĩ nhiên "trùng" với chính nó.
+    xet_trung = (
+        update.edited_message is None
+        and chat.id in cfg.chong_trung_nhom
+        and bool(msg.photo or msg.video)
+        and await control.get_flag(db, cfg, "chong_trung")
+    )
+
+    has_qr, qr_payloads, ocr_text, vt_anh = await _scan_image(
+        msg, context, can_van_tay=xet_trung and bool(msg.photo)
+    )
 
     # Vân tay ẢNH: bắt chiến dịch rải bằng ảnh, thứ mà bộ nhớ chữ mù hoàn toàn.
     # Ngưỡng cao hơn chữ một bậc: ba người cùng đăng lại một tấm meme trong
@@ -1165,6 +1345,10 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         verdict = analyse(facts, rules.cfg)
 
     if not verdict.is_spam:
+        # Xét SAU mọi luật spam: tin rác thì bị ban như thường chứ không chỉ
+        # bị xoá vì trùng, và không được ghi vào bộ nhớ ảnh của nhóm.
+        if xet_trung:
+            await _xet_trung_lap(context, msg, vt_anh)
         return
 
     # Chế độ lúc chạy (đổi bằng /action hoặc do phanh tự động) đè lên .env.
@@ -4622,6 +4806,12 @@ async def _post_init(app: Application) -> None:
             "Cài: apt install tesseract-ocr tesseract-ocr-vie && pip install pytesseract",
             ocr.UNAVAILABLE_REASON or "không rõ nguyên nhân",
         )
+    if cfg.chong_trung_nhom:
+        log.info(
+            "Chống ảnh/video trùng: %d nhóm, so %d ngày gần nhất%s",
+            len(cfg.chong_trung_nhom), cfg.chong_trung_ngay,
+            "" if trunglap.AVAILABLE else " — ✗ thiếu OpenCV, chỉ bắt được file y hệt",
+        )
 
     # Tha ngay nội dung của acc seeding đang có - chữa dữ liệu cũ ghi từ lúc
     # họ chưa được thêm vào danh sách.
@@ -4676,6 +4866,9 @@ async def _don_bo_nho(context: ContextTypes.DEFAULT_TYPE) -> None:
     xoa = await context.bot_data["db"].don_noi_dung(GIU_NOI_DUNG_NGAY)
     if xoa:
         log.info("Dọn bộ nhớ nội dung: bỏ %d bài không thành chiến dịch.", xoa)
+    xoa = await context.bot_data["db"].don_media(_cfg(context).chong_trung_ngay)
+    if xoa:
+        log.info("Dọn bộ nhớ chống trùng: bỏ %d ảnh/video đã quá hạn.", xoa)
 
 
 async def _post_shutdown(app: Application) -> None:

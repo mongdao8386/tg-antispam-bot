@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from pathlib import Path
+from typing import Callable
 
 from .vantay import cac_bang, giong_nhau, lech, sang_sqlite, tu_sqlite
 
@@ -148,6 +149,22 @@ CREATE TABLE IF NOT EXISTS phan_hoi (
     lan_cuoi INTEGER NOT NULL,
     vi_du    TEXT    NOT NULL DEFAULT ''
 );
+
+-- Ảnh/video đã đăng ở những nhóm bật chống trùng (xem trunglap.py). Chỉ giữ
+-- CHONG_TRUNG_NGAY ngày gần nhất, phần cũ hơn dọn mỗi ngày.
+CREATE TABLE IF NOT EXISTS media_hashes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id    INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
+    media_type TEXT    NOT NULL,             -- 'photo' | 'video'
+    file_hash  TEXT    NOT NULL DEFAULT '',  -- pHash hex; video: 3 khung cách nhau dấu phẩy
+    file_uid   TEXT    NOT NULL DEFAULT '',  -- file_unique_id của Telegram
+    duration   INTEGER NOT NULL DEFAULT 0,   -- giây, chỉ video
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_media_hashes_chat ON media_hashes (chat_id, media_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_media_hashes_uid ON media_hashes (chat_id, file_uid);
 """
 
 
@@ -961,6 +978,98 @@ class Storage:
 
     async def don_noi_dung(self, giu_ngay: int = 30) -> int:
         return await self._run(self._don_noi_dung, giu_ngay)
+
+    # -- chống ảnh/video trùng (xem trunglap.py) ---------------------------
+
+    def _media_trung_hoac_ghi(
+        self,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        loai: str,
+        file_uid: str,
+        file_hash: str,
+        thoi_luong: int,
+        giu_giay: int,
+        cho_sua_giay: int,
+        so: Callable[[str, int], bool] | None,
+        ghi: bool,
+    ) -> tuple[int, int, int] | None:
+        """Ảnh/video này đã có ai đăng ở nhóm này trong giu_giay giây qua chưa?
+
+        Thấy thì trả về (message_id, user_id, created_at) của bản cũ và KHÔNG ghi
+        bản mới - nó sắp bị xoá. Chưa thấy thì ghi lại (nếu ghi=True) rồi trả
+        về None. `so` là hàm so vân tay của một dòng đã lưu (trunglap.bo_so).
+
+        Tra và ghi trong cùng một lượt đồng bộ, không có await chen giữa: hai tin
+        cùng một tấm ảnh tới song song thì tin sau vẫn thấy tin trước.
+
+        Không cần chỉ mục băng như bộ nhớ chiến dịch: chỉ so trong MỘT nhóm và
+        vài ngày, cỡ vài nghìn dòng - so hết chừng 1ms.
+        """
+        now = int(time.time())
+        tu_luc = now - giu_giay
+
+        def cua_minh_vua_dang(uid: int, ts: int) -> bool:
+            # Chính người đó đăng lại ngay sau: thường là xoá đi đăng lại để sửa
+            # chú thích, không phải đăng lại để đẩy bài.
+            return uid == user_id and ts >= now - cho_sua_giay
+
+        if file_uid:
+            for mid, uid, ts in self._conn.execute(
+                "SELECT message_id, user_id, created_at FROM media_hashes"
+                " WHERE chat_id=? AND file_uid=? AND created_at>=? ORDER BY id",
+                (chat_id, file_uid, tu_luc),
+            ).fetchall():
+                if not cua_minh_vua_dang(uid, ts):
+                    return mid, uid, ts
+        if file_hash and so is not None:
+            for mid, uid, ts, h, d in self._conn.execute(
+                "SELECT message_id, user_id, created_at, file_hash, duration"
+                " FROM media_hashes WHERE chat_id=? AND media_type=? AND created_at>=?"
+                " AND file_hash<>'' ORDER BY id",
+                (chat_id, loai, tu_luc),
+            ).fetchall():
+                if not cua_minh_vua_dang(uid, ts) and so(h, d):
+                    return mid, uid, ts
+        if ghi:
+            self._conn.execute(
+                "INSERT INTO media_hashes (chat_id, message_id, user_id, media_type,"
+                " file_hash, file_uid, duration, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (chat_id, message_id, user_id, loai, file_hash, file_uid, thoi_luong, now),
+            )
+            self._conn.commit()
+        return None
+
+    async def media_trung_hoac_ghi(
+        self,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        loai: str,
+        file_uid: str,
+        file_hash: str = "",
+        thoi_luong: int = 0,
+        giu_giay: int = 7 * 86400,
+        cho_sua_giay: int = 0,
+        so: Callable[[str, int], bool] | None = None,
+        ghi: bool = True,
+    ) -> tuple[int, int, int] | None:
+        return await self._run(
+            self._media_trung_hoac_ghi, chat_id, message_id, user_id, loai, file_uid,
+            file_hash, thoi_luong, giu_giay, cho_sua_giay, so, ghi,
+        )
+
+    def _don_media(self, giu_ngay: int) -> int:
+        cur = self._conn.execute(
+            "DELETE FROM media_hashes WHERE created_at < ?",
+            (int(time.time()) - giu_ngay * 86400,),
+        )
+        self._conn.commit()
+        return cur.rowcount
+
+    async def don_media(self, giu_ngay: int = 7) -> int:
+        return await self._run(self._don_media, giu_ngay)
 
     # -- tự học từ những lần gỡ ban ----------------------------------------
 

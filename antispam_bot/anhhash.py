@@ -53,8 +53,20 @@ def van_tay_anh(data: bytes) -> int | None:
         return None
     try:
         anh = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_GRAYSCALE)
-        if anh is None or anh.size == 0:
-            return None
+    except Exception as exc:  # ảnh hỏng, định dạng lạ - không đáng làm sập bot
+        log.debug("Không đọc được ảnh: %s", exc)
+        return None
+    return van_tay_khung(anh)
+
+
+def van_tay_khung(anh) -> int | None:
+    """pHash của một ảnh đã giải mã (mảng xám hoặc màu BGR) - dùng cho khung
+    hình cắt từ video, vốn không có dạng file ảnh để đưa qua van_tay_anh."""
+    if not AVAILABLE or anh is None or anh.size == 0:
+        return None
+    try:
+        if anh.ndim == 3:
+            anh = cv2.cvtColor(anh, cv2.COLOR_BGR2GRAY)
         if float(anh.std()) < NGUONG_PHANG:
             return None
 

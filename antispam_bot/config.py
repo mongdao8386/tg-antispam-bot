@@ -143,6 +143,18 @@ class Config:
     # dài thì không.
     raid_users_anh: int = 4
 
+    # --- Chống ảnh/video đăng lại (xem trunglap.py) ---
+    # Chỉ chạy ở những nhóm liệt kê ở đây. Trống = tắt hẳn.
+    chong_trung_nhom: set[int] = field(default_factory=set)
+    # Công tắc chung, để tắt nhanh trong menu mà không phải sửa danh sách nhóm.
+    chong_trung: bool = True
+    # Chỉ so với ảnh/video đăng trong bấy nhiêu ngày gần nhất.
+    chong_trung_ngay: int = 7
+    # Lệch tối đa bấy nhiêu bit pHash (trên 63) thì vẫn coi là cùng một ảnh.
+    chong_trung_lech: int = 5
+    # Hiện một tin báo ngắn trong nhóm (tự xoá sau 10 giây) khi xoá bản trùng.
+    chong_trung_bao: bool = True
+
     # --- Captcha khi vào nhóm (xem captcha.py). Mặc định TẮT vì phải hiện
     # một tin trong nhóm; bật trong menu công tắc khi bị bot army tấn công. ---
     captcha: bool = False
@@ -246,6 +258,11 @@ class Config:
             repeat_window=float(_int("REPEAT_WINDOW", 120)),
             raid_users=_int("RAID_USERS", 3),
             raid_users_anh=_int("RAID_USERS_ANH", 4),
+            chong_trung_nhom=_id_list("CHONG_TRUNG_NHOM"),
+            chong_trung=_bool("CHONG_TRUNG", True),
+            chong_trung_ngay=max(1, _int("CHONG_TRUNG_NGAY", 7)),
+            chong_trung_lech=max(0, _int("CHONG_TRUNG_LECH", 5)),
+            chong_trung_bao=_bool("CHONG_TRUNG_BAO", True),
             captcha=_bool("CAPTCHA", False),
             captcha_seconds=max(30, _int("CAPTCHA_SECONDS", 120)),
             captcha_auto_joins=_int("CAPTCHA_AUTO_JOINS", 8),

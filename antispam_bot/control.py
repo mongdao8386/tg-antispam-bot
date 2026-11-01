@@ -75,6 +75,8 @@ CONG_TAC = {
     "chong_rai": "Chống rải hàng loạt",
     "captcha": "Captcha khi vào nhóm",
     "captcha_tu_dong": "Tự bật captcha khi vào dồn dập",
+    "chong_trung": "Xoá ảnh/video đăng lại",
+    "chong_trung_bao": "Báo trong nhóm khi xoá ảnh/video trùng",
 }
 
 

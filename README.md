@@ -283,6 +283,44 @@ tính thành một chiến dịch. Không đáng.
 Tắt bằng `CHONG_RAI=false` hoặc trong menu công tắc. Tốc độ: **0,06 ms** cho vân
 tay, **0,13 ms** cho cả lượt tra database.
 
+## Chống ảnh/video đăng lại
+
+Khác luật chiến dịch: không đếm bao nhiêu acc, không ban ai. Trong một nhóm, ảnh hay
+video nào đã có người đăng trong 7 ngày qua thì **bản đăng lại bị xoá** — kể cả
+chính người cũ đăng lại để đẩy bài. Hợp với nhóm rao vặt, review; nhóm trò chuyện
+thì một tấm meme quay lại là chuyện thường, nên **chỉ chạy ở nhóm bạn liệt kê**:
+
+```
+CHONG_TRUNG_NHOM=-1001234567890,-1009876543210
+```
+
+Hai tầng so:
+
+1. **Cùng một file** (`file_unique_id`) — chuyển tiếp, gửi lại. Không tải gì.
+2. **Vân tay pHash** — tải lên lại, nén lại, đổi cỡ vẫn bắt. Ảnh lệch ≤ 5 bit
+   (`CHONG_TRUNG_LECH`) là trùng. Video: vân tay ba khung ở 10%, 50%, 90% thời lượng,
+   cả ba phải khớp và thời lượng lệch không quá 1 giây. Video trên 20MB (trần tải
+   của Bot API) chỉ so được tầng 1.
+
+Không cần cài thêm gì: pHash dùng chung với vân tay ảnh của luật chiến dịch, còn
+video đọc bằng bộ giải mã FFmpeg có sẵn trong OpenCV.
+
+Để khỏi xoá oan:
+
+- **Acc seeding, admin, người tin cậy không bị xét** — và ảnh họ đăng cũng không
+  được ghi nhớ.
+- **Chính người đó đăng lại trong 10 phút thì cho qua** — thường là xoá đi đăng lại
+  để sửa chú thích.
+- **Tin bị bắt vì spam vẫn bị ban như thường**, không chỉ bị xoá vì trùng.
+- Ảnh gần như một màu (nền trắng, tối om) không có vân tay nên không bao giờ bị coi
+  là trùng.
+- Chế độ `report` thì chỉ ghi log, không xoá.
+
+Khi xoá, bot hiện một tin ngắn trong nhóm cho người đăng biết vì sao (kèm link bản
+gốc), tự xoá sau 10 giây, mỗi người tối đa một lần mỗi phút. Không muốn bot hiện gì
+trong nhóm thì tắt "Báo trong nhóm khi xoá ảnh/video trùng" trong ⚙️ Công tắc
+(hoặc `CHONG_TRUNG_BAO=false`). Mọi lần xoá đều ghi vào `LOG_CHAT_ID`.
+
 ## Captcha khi vào nhóm
 
 Mọi luật khác đều xử lý **sau** khi tin đã hiện ra. Chiến dịch 334 tài khoản đo được là
@@ -514,6 +552,7 @@ antispam_bot/
   raivai.py     chống rải hàng loạt (dồn tin / lặp / phối hợp)
   vantay.py     vân tay chữ chịu được sửa đổi nhỏ (SimHash)
   anhhash.py    vân tay ảnh chịu được nén/thu nhỏ (pHash)
+  trunglap.py   chống ảnh/video đăng lại trong một nhóm
   tuhoc.py      học từ những lần admin gỡ ban
   captcha.py    captcha khi vào nhóm (phần logic thuần)
   menu.py       dựng menu nút bấm từ dữ liệu (không gọi Telegram)
@@ -528,6 +567,7 @@ tests/
   test_detector.py  luật + những tin thật từng bị ban oan
   test_vantay.py    vân tay chữ + bộ nhớ chiến dịch
   test_tuhoc.py     vân tay ảnh + tự học
+  test_trunglap.py  ảnh/video đăng lại: vân tay, database, xoá + báo
   test_captcha.py
   test_menu.py
 ```
