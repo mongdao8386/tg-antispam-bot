@@ -286,7 +286,7 @@ tay, **0,13 ms** cho cả lượt tra database.
 ## Chống ảnh/video đăng lại
 
 Khác luật chiến dịch: không đếm bao nhiêu acc, không ban ai. Trong một nhóm, ảnh hay
-video nào đã có trong 7 ngày qua thì bản đăng lại bị xử lý — **với mọi người**, kể cả
+video nào đã có trong 30 ngày qua (`CHONG_TRUNG_NGAY`) thì bản đăng lại bị xử lý — **với mọi người**, kể cả
 chủ nhóm, admin, admin ẩn danh, acc seeding, và cả chính người cũ đăng lại ngay sau
 đó. Hợp với nhóm rao vặt, kho ảnh; nhóm trò chuyện thì một tấm meme quay lại là
 chuyện thường, nên **chỉ chạy ở nhóm bạn liệt kê**:

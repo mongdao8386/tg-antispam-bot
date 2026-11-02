@@ -111,6 +111,19 @@ def giong_nhau(a: list[int | None], b: list[int | None], lech_toi_da: int) -> bo
 def bo_so(cac_vt: list[int | None], thoi_luong: int) -> Callable[[str, int], int | None]:
     """Hàm đo độ lệch của một dòng đã lưu (file_hash, duration) với bản đang
     xét. None nếu không thể là một (thời lượng khác hẳn, thiếu khung)."""
+    if len(cac_vt) == 1 and cac_vt[0] is not None:
+        # Ảnh: một vân tay, so thẳng không qua giai_ma. Hàm này chạy cho TỪNG
+        # ảnh đã lưu trong CHONG_TRUNG_NGAY ngày - giữ 30 ngày ở nhóm đông là
+        # hàng chục nghìn lượt mỗi ảnh mới, đường chung chậm gấp mấy lần.
+        vt = cac_vt[0]
+
+        def so_anh(file_hash: str, _duration: int) -> int | None:
+            try:
+                return (int(file_hash, 16) ^ vt).bit_count()
+            except ValueError:
+                return None
+        return so_anh
+
     def so(file_hash: str, duration: int) -> int | None:
         if thoi_luong and duration and abs(thoi_luong - duration) > LECH_THOI_LUONG:
             return None

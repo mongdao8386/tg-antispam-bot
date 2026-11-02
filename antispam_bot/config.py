@@ -148,8 +148,9 @@ class Config:
     chong_trung_nhom: set[int] = field(default_factory=set)
     # Công tắc chung, để tắt nhanh trong menu mà không phải sửa danh sách nhóm.
     chong_trung: bool = True
-    # Chỉ so với ảnh/video đăng trong bấy nhiêu ngày gần nhất.
-    chong_trung_ngay: int = 7
+    # Chỉ so với ảnh/video đăng trong bấy nhiêu ngày gần nhất. Chủ bot muốn ít
+    # nhất một tháng: kho ảnh đăng lại sau vài tuần vẫn là trùng.
+    chong_trung_ngay: int = 30
     # Lệch tối đa bấy nhiêu bit pHash (trên 63) thì coi là GIỐNG: không xoá,
     # bot reply vào tin đó cho admin xem tay.
     chong_trung_lech: int = 5
@@ -263,7 +264,7 @@ class Config:
             raid_users_anh=_int("RAID_USERS_ANH", 4),
             chong_trung_nhom=_id_list("CHONG_TRUNG_NHOM"),
             chong_trung=_bool("CHONG_TRUNG", True),
-            chong_trung_ngay=max(1, _int("CHONG_TRUNG_NGAY", 7)),
+            chong_trung_ngay=max(1, _int("CHONG_TRUNG_NGAY", 30)),
             chong_trung_lech=max(0, _int("CHONG_TRUNG_LECH", 5)),
             chong_trung_lech_xoa=max(0, _int("CHONG_TRUNG_LECH_XOA", 0)),
             chong_trung_bao=_bool("CHONG_TRUNG_BAO", True),
