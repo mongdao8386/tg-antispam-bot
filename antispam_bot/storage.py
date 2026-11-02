@@ -991,15 +991,20 @@ class Storage:
         file_hash: str,
         thoi_luong: int,
         giu_giay: int,
-        cho_sua_giay: int,
-        so: Callable[[str, int], bool] | None,
+        so: Callable[[str, int], int | None] | None,
+        lech_toi_da: int,
+        lech_xoa: int,
         ghi: bool,
-    ) -> tuple[int, int, int] | None:
+    ) -> tuple[int, int, int, int] | None:
         """Ảnh/video này đã có ai đăng ở nhóm này trong giu_giay giây qua chưa?
 
-        Thấy thì trả về (message_id, user_id, created_at) của bản cũ và KHÔNG ghi
-        bản mới - nó sắp bị xoá. Chưa thấy thì ghi lại (nếu ghi=True) rồi trả
-        về None. `so` là hàm so vân tay của một dòng đã lưu (trunglap.bo_so).
+        Trả về (message_id, user_id, created_at, độ lệch) của bản cũ GIỐNG NHẤT
+        trong phạm vi lech_toi_da, hoặc None nếu chưa thấy. Cùng file thì độ
+        lệch là 0. `so` trả về độ lệch vân tay với một dòng đã lưu, None nếu
+        không so được (trunglap.bo_so).
+
+        Lệch <= lech_xoa: bản mới sắp bị xoá nên KHÔNG ghi. Còn lại thì ghi (nếu
+        ghi=True) - kể cả bản chỉ giống, vì nó vẫn ở lại nhóm.
 
         Tra và ghi trong cùng một lượt đồng bộ, không có await chen giữa: hai tin
         cùng một tấm ảnh tới song song thì tin sau vẫn thấy tin trước.
@@ -1009,37 +1014,38 @@ class Storage:
         """
         now = int(time.time())
         tu_luc = now - giu_giay
-
-        def cua_minh_vua_dang(uid: int, ts: int) -> bool:
-            # Chính người đó đăng lại ngay sau: thường là xoá đi đăng lại để sửa
-            # chú thích, không phải đăng lại để đẩy bài.
-            return uid == user_id and ts >= now - cho_sua_giay
+        gan: tuple[int, int, int, int] | None = None
 
         if file_uid:
-            for mid, uid, ts in self._conn.execute(
+            row = self._conn.execute(
                 "SELECT message_id, user_id, created_at FROM media_hashes"
-                " WHERE chat_id=? AND file_uid=? AND created_at>=? ORDER BY id",
+                " WHERE chat_id=? AND file_uid=? AND created_at>=? ORDER BY id LIMIT 1",
                 (chat_id, file_uid, tu_luc),
-            ).fetchall():
-                if not cua_minh_vua_dang(uid, ts):
-                    return mid, uid, ts
-        if file_hash and so is not None:
+            ).fetchone()
+            if row:
+                gan = (row[0], row[1], row[2], 0)
+        if gan is None and file_hash and so is not None:
             for mid, uid, ts, h, d in self._conn.execute(
                 "SELECT message_id, user_id, created_at, file_hash, duration"
                 " FROM media_hashes WHERE chat_id=? AND media_type=? AND created_at>=?"
                 " AND file_hash<>'' ORDER BY id",
                 (chat_id, loai, tu_luc),
             ).fetchall():
-                if not cua_minh_vua_dang(uid, ts) and so(h, d):
-                    return mid, uid, ts
-        if ghi:
+                do_lech = so(h, d)
+                if do_lech is not None and do_lech <= lech_toi_da and (
+                    gan is None or do_lech < gan[3]
+                ):
+                    gan = (mid, uid, ts, do_lech)
+                    if do_lech == 0:
+                        break
+        if ghi and (gan is None or gan[3] > lech_xoa):
             self._conn.execute(
                 "INSERT INTO media_hashes (chat_id, message_id, user_id, media_type,"
                 " file_hash, file_uid, duration, created_at) VALUES (?,?,?,?,?,?,?,?)",
                 (chat_id, message_id, user_id, loai, file_hash, file_uid, thoi_luong, now),
             )
             self._conn.commit()
-        return None
+        return gan
 
     async def media_trung_hoac_ghi(
         self,
@@ -1051,13 +1057,14 @@ class Storage:
         file_hash: str = "",
         thoi_luong: int = 0,
         giu_giay: int = 7 * 86400,
-        cho_sua_giay: int = 0,
-        so: Callable[[str, int], bool] | None = None,
+        so: Callable[[str, int], int | None] | None = None,
+        lech_toi_da: int = 5,
+        lech_xoa: int = 0,
         ghi: bool = True,
-    ) -> tuple[int, int, int] | None:
+    ) -> tuple[int, int, int, int] | None:
         return await self._run(
             self._media_trung_hoac_ghi, chat_id, message_id, user_id, loai, file_uid,
-            file_hash, thoi_luong, giu_giay, cho_sua_giay, so, ghi,
+            file_hash, thoi_luong, giu_giay, so, lech_toi_da, lech_xoa, ghi,
         )
 
     def _don_media(self, giu_ngay: int) -> int:

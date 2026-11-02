@@ -286,40 +286,38 @@ tay, **0,13 ms** cho cả lượt tra database.
 ## Chống ảnh/video đăng lại
 
 Khác luật chiến dịch: không đếm bao nhiêu acc, không ban ai. Trong một nhóm, ảnh hay
-video nào đã có người đăng trong 7 ngày qua thì **bản đăng lại bị xoá** — kể cả
-chính người cũ đăng lại để đẩy bài. Hợp với nhóm rao vặt, review; nhóm trò chuyện
-thì một tấm meme quay lại là chuyện thường, nên **chỉ chạy ở nhóm bạn liệt kê**:
+video nào đã có trong 7 ngày qua thì bản đăng lại bị xử lý — **với mọi người**, kể cả
+chủ nhóm, admin, admin ẩn danh, acc seeding, và cả chính người cũ đăng lại ngay sau
+đó. Hợp với nhóm rao vặt, kho ảnh; nhóm trò chuyện thì một tấm meme quay lại là
+chuyện thường, nên **chỉ chạy ở nhóm bạn liệt kê**:
 
 ```
 CHONG_TRUNG_NHOM=-1001234567890,-1009876543210
 ```
 
-Hai tầng so:
+Hai mức:
 
-1. **Cùng một file** (`file_unique_id`) — chuyển tiếp, gửi lại. Không tải gì.
-2. **Vân tay pHash** — tải lên lại, nén lại, đổi cỡ vẫn bắt. Ảnh lệch ≤ 5 bit
-   (`CHONG_TRUNG_LECH`) là trùng. Video: vân tay ba khung ở 10%, 50%, 90% thời lượng,
-   cả ba phải khớp và thời lượng lệch không quá 1 giây. Video trên 20MB (trần tải
-   của Bot API) chỉ so được tầng 1.
+| | Khi nào | Bot làm gì |
+|---|---|---|
+| **Trùng** | Cùng một file (chuyển tiếp, gửi lại), hoặc tải lên lại mà vân tay lệch 0 bit (`CHONG_TRUNG_LECH_XOA`) | **Xoá**, hiện tin báo ngắn tự xoá sau 10 giây |
+| **Giống** | Vân tay lệch 1–5 bit (`CHONG_TRUNG_LECH`) — ảnh chụp lại, cắt nhẹ, hai tấm chụp liền nhau | **Không xoá**, reply thẳng vào tin đó ("giống ~95% bản đã đăng…") để admin xem tay |
+
+Tin "giống" vẫn ở lại nhóm nên vẫn được ghi nhớ: ai đăng lại đúng tấm đó thì bị xoá.
+Reply nghi trùng không tự xoá, và có cả link trong `LOG_CHAT_ID` để soát lần lượt.
+
+Video: vân tay ba khung ở 10%, 50%, 90% thời lượng, lấy khung lệch nhiều nhất, thời
+lượng lệch không quá 1 giây. Video quay lại ở cỡ khác thường lệch 2–4 bit nên rơi vào
+mức "giống". Video trên 20MB (trần tải của Bot API) chỉ so được cùng file.
 
 Không cần cài thêm gì: pHash dùng chung với vân tay ảnh của luật chiến dịch, còn
 video đọc bằng bộ giải mã FFmpeg có sẵn trong OpenCV.
 
-Để khỏi xoá oan:
-
-- **Acc seeding, admin, người tin cậy không bị xét** — và ảnh họ đăng cũng không
-  được ghi nhớ.
-- **Chính người đó đăng lại trong 10 phút thì cho qua** — thường là xoá đi đăng lại
-  để sửa chú thích.
-- **Tin bị bắt vì spam vẫn bị ban như thường**, không chỉ bị xoá vì trùng.
-- Ảnh gần như một màu (nền trắng, tối om) không có vân tay nên không bao giờ bị coi
-  là trùng.
-- Chế độ `report` thì chỉ ghi log, không xoá.
-
-Khi xoá, bot hiện một tin ngắn trong nhóm cho người đăng biết vì sao (kèm link bản
-gốc), tự xoá sau 10 giây, mỗi người tối đa một lần mỗi phút. Không muốn bot hiện gì
-trong nhóm thì tắt "Báo trong nhóm khi xoá ảnh/video trùng" trong ⚙️ Công tắc
-(hoặc `CHONG_TRUNG_BAO=false`). Mọi lần xoá đều ghi vào `LOG_CHAT_ID`.
+- **Tin bị bắt vì spam vẫn bị ban như thường** và không được ghi nhớ.
+- Ảnh gần như một màu (nền trắng, tối om) không có vân tay — chỉ bị xoá khi đúng file.
+- Chế độ `report` thì chỉ ghi log, không xoá, không reply.
+- Tắt tin báo khi xoá: "Báo trong nhóm khi xoá ảnh/video trùng" trong ⚙️ Công tắc
+  (hoặc `CHONG_TRUNG_BAO=false`). Không muốn reply nghi trùng: đặt `CHONG_TRUNG_LECH`
+  bằng `CHONG_TRUNG_LECH_XOA`.
 
 ## Captcha khi vào nhóm
 
@@ -567,7 +565,7 @@ tests/
   test_detector.py  luật + những tin thật từng bị ban oan
   test_vantay.py    vân tay chữ + bộ nhớ chiến dịch
   test_tuhoc.py     vân tay ảnh + tự học
-  test_trunglap.py  ảnh/video đăng lại: vân tay, database, xoá + báo
+  test_trunglap.py  ảnh/video đăng lại: vân tay, database, xoá / reply nghi trùng
   test_captcha.py
   test_menu.py
 ```

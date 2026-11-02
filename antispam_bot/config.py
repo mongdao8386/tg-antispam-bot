@@ -150,8 +150,11 @@ class Config:
     chong_trung: bool = True
     # Chỉ so với ảnh/video đăng trong bấy nhiêu ngày gần nhất.
     chong_trung_ngay: int = 7
-    # Lệch tối đa bấy nhiêu bit pHash (trên 63) thì vẫn coi là cùng một ảnh.
+    # Lệch tối đa bấy nhiêu bit pHash (trên 63) thì coi là GIỐNG: không xoá,
+    # bot reply vào tin đó cho admin xem tay.
     chong_trung_lech: int = 5
+    # Lệch tối đa bấy nhiêu bit thì coi là TRÙNG và xoá. Cùng file thì luôn xoá.
+    chong_trung_lech_xoa: int = 0
     # Hiện một tin báo ngắn trong nhóm (tự xoá sau 10 giây) khi xoá bản trùng.
     chong_trung_bao: bool = True
 
@@ -262,6 +265,7 @@ class Config:
             chong_trung=_bool("CHONG_TRUNG", True),
             chong_trung_ngay=max(1, _int("CHONG_TRUNG_NGAY", 7)),
             chong_trung_lech=max(0, _int("CHONG_TRUNG_LECH", 5)),
+            chong_trung_lech_xoa=max(0, _int("CHONG_TRUNG_LECH_XOA", 0)),
             chong_trung_bao=_bool("CHONG_TRUNG_BAO", True),
             captcha=_bool("CAPTCHA", False),
             captcha_seconds=max(30, _int("CAPTCHA_SECONDS", 120)),

@@ -8,7 +8,7 @@ Lệnh quản trị cũng tự xoá sau vài giây để nhóm luôn sạch.
 from __future__ import annotations
 
 import asyncio
-from collections import deque
+from collections import OrderedDict, deque
 import contextlib
 import html
 import logging
@@ -42,6 +42,7 @@ from telegram.ext import (
     AIORateLimiter,
     Application,
     ApplicationBuilder,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     ChatMemberHandler,
     CommandHandler,
@@ -652,22 +653,32 @@ def _image_ref(msg: Message, max_bytes: int) -> tuple[str, str] | None:
     return None
 
 
+# file_unique_id -> vân tay ảnh. Chống trùng chạy SAU scan() trên cùng tin nên
+# lấy lại được ở đây, khỏi tải ảnh lần hai.
+_vt_anh_nho: OrderedDict[str, int | None] = OrderedDict()
+VT_ANH_NHO = 2000
+
+
 async def _scan_image(
-    msg: Message, context: ContextTypes.DEFAULT_TYPE, can_van_tay: bool = False
+    msg: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    can_van_tay: bool = False,
+    chi_van_tay: bool = False,
 ) -> tuple[bool, list[str], str, int | None]:
     """Soi ảnh: (có QR, nội dung QR, chữ trong ảnh, vân tay ảnh).
 
     Tải ảnh về ĐÚNG MỘT LẦN rồi dùng chung cho cả QR lẫn OCR - trước đây mỗi
     thứ tải riêng là phí băng thông và thời gian. can_van_tay: cần vân tay cho
-    chống trùng dù công tắc chống rải đang tắt.
+    chống trùng dù công tắc chống rải đang tắt. chi_van_tay: chỉ cần vân tay,
+    bỏ QR/OCR.
     """
     cfg = _cfg(context)
     db = _db(context)
     # Đọc qua công tắc để /panel bật/tắt được ngay, không cần khởi động lại.
-    want_qr = await control.get_flag(db, cfg, "scan_qr") and qrscan.AVAILABLE
-    want_ocr = await control.get_flag(db, cfg, "scan_ocr") and ocr.AVAILABLE
+    want_qr = not chi_van_tay and await control.get_flag(db, cfg, "scan_qr") and qrscan.AVAILABLE
+    want_ocr = not chi_van_tay and await control.get_flag(db, cfg, "scan_ocr") and ocr.AVAILABLE
     want_vt = (
-        can_van_tay or await control.get_flag(db, cfg, "chong_rai")
+        can_van_tay or chi_van_tay or await control.get_flag(db, cfg, "chong_rai")
     ) and anhhash.AVAILABLE
     if not want_qr and not want_ocr and not want_vt:
         return False, [], "", None
@@ -676,6 +687,8 @@ async def _scan_image(
     if ref is None:
         return False, [], "", None
     file_id, unique_id = ref
+    if chi_van_tay and unique_id in _vt_anh_nho:
+        return False, [], "", _vt_anh_nho[unique_id]
 
     async def _tai_anh() -> bytes | None:
         """Tải ảnh, thử lại vài lần khi mạng chập chờn. None nghĩa là bỏ cuộc."""
@@ -737,6 +750,10 @@ async def _scan_image(
         return None
 
     (has_qr, payloads), text, vt_anh = await asyncio.gather(_qr(), _ocr(), _van_tay())
+    if want_vt:
+        _vt_anh_nho[unique_id] = vt_anh
+        while len(_vt_anh_nho) > VT_ANH_NHO:
+            _vt_anh_nho.popitem(last=False)
     return has_qr, payloads, text, vt_anh
 
 
@@ -1027,9 +1044,6 @@ async def _xet_chien_dich(
 
 # --- Chống ảnh/video đăng lại (xem trunglap.py) ---
 
-# Chính người đó đăng lại trong bấy nhiêu giây thì cho qua: thường là xoá đi
-# đăng lại để sửa chú thích. Đăng lại để đẩy bài thì cách nhau hàng giờ.
-CHO_SUA_GIAY = 600
 # Tin báo trong nhóm tự xoá sau chừng này giây.
 BAO_TRUNG_SONG = 10
 # Mỗi người chỉ bị báo một lần trong chừng này giây: đăng lại album 10 tấm là
@@ -1101,6 +1115,8 @@ async def _bao_trung(
 
     if msg.sender_chat is None and user is not None:
         ai = f'<a href="tg://user?id={user.id}">{html.escape(user.full_name)}</a>'
+    elif msg.sender_chat is not None and msg.sender_chat.id == msg.chat_id:
+        ai = "<b>Admin ẩn danh</b>"
     else:
         ai = f"<b>{html.escape(msg.sender_chat.title if msg.sender_chat else '?')}</b>"
     link = _link_tin(msg.chat, mid_cu)
@@ -1124,17 +1140,39 @@ async def _bao_trung(
         )
 
 
+async def _bao_tuong_dong(
+    context: ContextTypes.DEFAULT_TYPE, msg: Message, cai_gi: str, mid_cu: int, ts_cu: int,
+    do_lech: int,
+) -> None:
+    """Reply thẳng vào tin chỉ GIỐNG (chưa chắc trùng) để admin xem tay. Tin
+    này không tự xoá: nó là dấu để admin tìm lại."""
+    link = _link_tin(msg.chat, mid_cu)
+    goc = f'<a href="{link}">bản đã đăng</a>' if link else "bản đã đăng"
+    giong = 100 - round(do_lech * 100 / 63)
+    try:
+        await msg.reply_html(
+            f"⚠️ {cai_gi.capitalize()} này giống ~{giong}% {goc} {_luc_truoc(time.time() - ts_cu)}"
+            " — bot không xoá, admin kiểm tra giúp.",
+            do_quote=True, disable_web_page_preview=True, disable_notification=True,
+        )
+    except TelegramError as exc:
+        log.warning("Không reply được tin nghi trùng ở %s: %s", msg.chat_id, exc)
+
+
 async def _xet_trung_lap(
     context: ContextTypes.DEFAULT_TYPE, msg: Message, vt_anh: int | None
-) -> bool:
-    """Ảnh/video này đã có trong nhóm mấy ngày qua thì xoá bản đăng lại.
+) -> str | None:
+    """Ảnh/video này đã có trong nhóm mấy ngày qua chưa?
 
-    Chỉ gọi cho tin mới đã qua hết luật spam, ở nhóm có trong CHONG_TRUNG_NHOM.
-    Người được miễn (admin, seeding, trusted) không bao giờ tới được đây - acc
-    seeding đăng lại quảng cáo của chủ bot mỗi ngày là việc của họ. vt_anh là
-    vân tay _scan_image vừa tính, khỏi tải ảnh lần nữa.
+    Trùng (cùng file, hoặc vân tay lệch <= CHONG_TRUNG_LECH_XOA) thì xoá. Chỉ
+    giống (lệch <= CHONG_TRUNG_LECH) thì giữ lại và reply cho admin xem tay -
+    hai tấm chụp liền nhau cùng một dáng cũng lệch chừng đó, xoá thì oan.
 
-    Trả về True nếu là bản trùng.
+    Áp dụng với MỌI người, kể cả admin, admin ẩn danh, acc seeding: chủ bot
+    muốn vậy ở những nhóm bật chống trùng. Chỉ xoá chứ không bao giờ ban.
+    vt_anh là vân tay ảnh đã tính sẵn (None nếu là video hay ảnh phẳng).
+
+    Trả về "xoa", "giong", hoặc None nếu chưa từng thấy.
     """
     cfg, db = _cfg(context), _db(context)
     uid = msg.sender_chat.id if msg.sender_chat else (msg.from_user.id if msg.from_user else 0)
@@ -1146,7 +1184,8 @@ async def _xet_trung_lap(
     chung = dict(
         chat_id=msg.chat_id, message_id=msg.message_id, user_id=uid, loai=loai,
         file_uid=media.file_unique_id, thoi_luong=thoi_luong,
-        giu_giay=cfg.chong_trung_ngay * 86400, cho_sua_giay=CHO_SUA_GIAY,
+        giu_giay=cfg.chong_trung_ngay * 86400,
+        lech_toi_da=cfg.chong_trung_lech, lech_xoa=cfg.chong_trung_lech_xoa,
     )
 
     cu = None
@@ -1159,28 +1198,61 @@ async def _xet_trung_lap(
     if cu is None:
         cu = await db.media_trung_hoac_ghi(
             **chung, file_hash=trunglap.ma_hoa(cac_vt),
-            so=trunglap.bo_so(cac_vt, thoi_luong, cfg.chong_trung_lech),
+            so=trunglap.bo_so(cac_vt, thoi_luong),
         )
     if cu is None:
-        return False
+        return None
 
-    mid_cu, _uid_cu, ts_cu = cu
+    mid_cu, _uid_cu, ts_cu, do_lech = cu
+    xoa = do_lech <= cfg.chong_trung_lech_xoa
     che_do = await control.effective_action(db, cfg)
     if che_do != "report":
-        try:
-            await msg.delete()
-        except TelegramError as exc:
-            # Không xoá được thì đừng báo là đã xoá.
-            log.warning("Không xoá được %s trùng %s: %s", cai_gi, msg.message_id, exc)
-            return True
-        if await control.get_flag(db, cfg, "chong_trung_bao"):
-            await _bao_trung(context, msg, cai_gi, mid_cu, ts_cu)
-    ly_do = f"{cai_gi} đăng lại, trùng tin {mid_cu} từ {_luc_truoc(time.time() - ts_cu)}"
-    await _report(
-        context, msg.chat, msg, Verdict(reasons=[ly_do]),
-        "report" if che_do == "report" else "delete",
-    )
-    return True
+        if not xoa:
+            await _bao_tuong_dong(context, msg, cai_gi, mid_cu, ts_cu, do_lech)
+        else:
+            try:
+                await msg.delete()
+            except TelegramError as exc:
+                # Không xoá được thì đừng báo là đã xoá.
+                log.warning("Không xoá được %s trùng %s: %s", cai_gi, msg.message_id, exc)
+                return "xoa"
+            if await control.get_flag(db, cfg, "chong_trung_bao"):
+                await _bao_trung(context, msg, cai_gi, mid_cu, ts_cu)
+
+    # Link trần trong lý do: Telegram tự biến thành link bấm được ở kênh log.
+    khi = _luc_truoc(time.time() - ts_cu)
+    if xoa:
+        ly_do = f"{cai_gi} đăng lại, trùng tin {mid_cu} từ {khi}"
+    else:
+        ly_do = (
+            f"{cai_gi} giống tin {mid_cu} ({khi}), lệch {do_lech}/63 - chưa xoá, cần xem: "
+            f"{_link_tin(msg.chat, msg.message_id) or msg.message_id}"
+        )
+    hanh_dong = "report" if che_do == "report" else ("delete" if xoa else "nghi trùng")
+    await _report(context, msg.chat, msg, Verdict(reasons=[ly_do]), hanh_dong)
+    return "xoa" if xoa else "giong"
+
+
+async def on_media_trung(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Chống ảnh/video đăng lại - handler riêng ở nhóm 2, chạy SAU scan().
+
+    Tách khỏi scan() vì scan() bỏ qua ngay người được miễn, còn ở đây thì không
+    ai được miễn. Tin scan() đã xử lý vì spam thì không tới được đây (scan() dừng
+    chuỗi handler bằng ApplicationHandlerStop), nên không bị ghi nhớ.
+    """
+    msg, chat = update.effective_message, update.effective_chat
+    cfg, db = _cfg(context), _db(context)
+    if msg is None or chat is None or chat.id not in cfg.chong_trung_nhom:
+        return
+    if not await control.get_flag(db, cfg, "chong_trung"):
+        return
+    dang_ngung, _ = await control.is_paused(db)
+    if dang_ngung:
+        return
+    vt_anh = None
+    if msg.photo:
+        _, _, _, vt_anh = await _scan_image(msg, context, chi_van_tay=True)
+    await _xet_trung_lap(context, msg, vt_anh)
 
 
 async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1202,7 +1274,7 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await msg.delete()
         except TelegramError:
             pass
-        return
+        raise ApplicationHandlerStop   # tin đã xoá: chống trùng khỏi xét
 
     # Đang tạm ngưng (bấm nút hoặc /pause) thì bỏ qua hết, kể cả quét ảnh -
     # ngưng là ngưng hẳn, đỡ tốn băng thông và CPU.
@@ -1279,17 +1351,10 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not force_punish:
             fwd_exempt = msg.from_user.id in rules.seeding
 
-    # Chống ảnh/video đăng lại. Chỉ tin MỚI: sửa chú thích thì Telegram gửi lại
-    # cả tin, mà tin đó dĩ nhiên "trùng" với chính nó.
-    xet_trung = (
-        update.edited_message is None
-        and chat.id in cfg.chong_trung_nhom
-        and bool(msg.photo or msg.video)
-        and await control.get_flag(db, cfg, "chong_trung")
-    )
-
+    # Nhóm bật chống trùng: tính luôn vân tay ở lượt tải này để on_media_trung
+    # khỏi tải ảnh lần hai.
     has_qr, qr_payloads, ocr_text, vt_anh = await _scan_image(
-        msg, context, can_van_tay=xet_trung and bool(msg.photo)
+        msg, context, can_van_tay=chat.id in cfg.chong_trung_nhom and bool(msg.photo)
     )
 
     # Vân tay ẢNH: bắt chiến dịch rải bằng ảnh, thứ mà bộ nhớ chữ mù hoàn toàn.
@@ -1345,10 +1410,6 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         verdict = analyse(facts, rules.cfg)
 
     if not verdict.is_spam:
-        # Xét SAU mọi luật spam: tin rác thì bị ban như thường chứ không chỉ
-        # bị xoá vì trùng, và không được ghi vào bộ nhớ ảnh của nhóm.
-        if xet_trung:
-            await _xet_trung_lap(context, msg, vt_anh)
         return
 
     # Chế độ lúc chạy (đổi bằng /action hoặc do phanh tự động) đè lên .env.
@@ -1390,6 +1451,10 @@ async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
     if action in ("ban", "mute"):
         await _check_brake(context)
+    # Tin rác đã bị xoá: dừng ở đây để on_media_trung (nhóm 2) không ghi nhớ nó.
+    # Chế độ report thì tin còn nguyên, cứ để chống trùng xét tiếp.
+    if action != "report":
+        raise ApplicationHandlerStop
 
 
 # Tin nhắn dịch vụ: thuộc tính trên Message ứng với từng nhóm.
@@ -5012,6 +5077,17 @@ def build_application(cfg: Config) -> Application:
         MessageHandler(filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL, scan), group=1
     )
     app.add_handler(MessageHandler(filters.StatusUpdate.ALL, on_service), group=1)
+    # Nhóm 2: chống ảnh/video đăng lại, SAU khi scan() đã xét spam. Chỉ tin MỚI:
+    # sửa chú thích thì Telegram gửi lại cả tin, mà tin đó dĩ nhiên "trùng" với
+    # chính nó.
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS & filters.UpdateType.MESSAGE
+            & (filters.PHOTO | filters.VIDEO),
+            on_media_trung,
+        ),
+        group=2,
+    )
     app.add_handler(
         ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER), group=1
     )

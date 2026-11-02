@@ -3,8 +3,15 @@
 KHÁC LUẬT CHIẾN DỊCH THẾ NÀO
 Luật chiến dịch đếm bao nhiêu TÀI KHOẢN khác nhau cùng đăng một thứ, trên MỌI
 nhóm, rồi ban. Ở đây đơn giản hơn: trong một nhóm, ảnh/video nào đã có người
-đăng trong vài ngày gần đây thì bản đăng lại bị xoá - kể cả chính người cũ đăng
-lại để đẩy bài. Không ban ai.
+đăng trong vài ngày gần đây thì bản đăng lại bị xoá - với MỌI người, kể cả
+admin, admin ẩn danh, acc seeding. Không ban ai.
+
+HAI MỨC
+- Trùng (cùng file, hoặc vân tay lệch <= CHONG_TRUNG_LECH_XOA, mặc định 0):
+  xoá.
+- Chỉ giống (lệch <= CHONG_TRUNG_LECH, mặc định 5): giữ lại, bot reply vào tin
+  đó cho admin xem tay. Hai tấm chụp liền nhau cùng một dáng cũng lệch chừng
+  đó - xoá thì oan.
 
 Chỉ chạy ở những nhóm liệt kê trong CHONG_TRUNG_NHOM: nhóm rao vặt, review thì
 đăng lại là rác, còn nhóm trò chuyện thì một tấm meme quay lại là chuyện thường.
@@ -82,26 +89,32 @@ def giai_ma(chuoi: str) -> list[int | None]:
     return out
 
 
-def giong_nhau(a: list[int | None], b: list[int | None], lech_toi_da: int) -> bool:
-    """Hai bộ vân tay có phải cùng một ảnh/video không.
+def do_lech(a: list[int | None], b: list[int | None]) -> int | None:
+    """Độ lệch giữa hai bộ vân tay: số bit lệch ở khung lệch NHIỀU NHẤT. None
+    nếu không đủ khung để so.
 
-    Mọi khung so được đều phải gần nhau, không phải chỉ đa số: hai video khác
-    nhau mà chung cảnh mở đầu vẫn lệch hẳn ở khung giữa.
+    Lấy khung lệch nhất chứ không lấy trung bình: hai video khác nhau mà chung
+    cảnh mở đầu vẫn lệch hẳn ở khung giữa, trung bình sẽ che mất chỗ đó.
     """
     cap = [(x, y) for x, y in zip(a, b) if x is not None and y is not None]
     if not cap or (len(a) > 1 and len(cap) < KHUNG_TOI_THIEU):
-        return False
-    return all(lech(x, y) <= lech_toi_da for x, y in cap)
+        return None
+    return max(lech(x, y) for x, y in cap)
 
 
-def bo_so(
-    cac_vt: list[int | None], thoi_luong: int, lech_toi_da: int
-) -> Callable[[str, int], bool]:
-    """Hàm so một dòng đã lưu (file_hash, duration) với bản đang xét."""
-    def so(file_hash: str, duration: int) -> bool:
+def giong_nhau(a: list[int | None], b: list[int | None], lech_toi_da: int) -> bool:
+    """Hai bộ vân tay có phải cùng một ảnh/video không."""
+    d = do_lech(a, b)
+    return d is not None and d <= lech_toi_da
+
+
+def bo_so(cac_vt: list[int | None], thoi_luong: int) -> Callable[[str, int], int | None]:
+    """Hàm đo độ lệch của một dòng đã lưu (file_hash, duration) với bản đang
+    xét. None nếu không thể là một (thời lượng khác hẳn, thiếu khung)."""
+    def so(file_hash: str, duration: int) -> int | None:
         if thoi_luong and duration and abs(thoi_luong - duration) > LECH_THOI_LUONG:
-            return False
-        return giong_nhau(cac_vt, giai_ma(file_hash), lech_toi_da)
+            return None
+        return do_lech(cac_vt, giai_ma(file_hash))
     return so
 
 
